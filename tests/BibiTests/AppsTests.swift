@@ -330,6 +330,9 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         #expect(DateText.normalize("2026-10-30 09:30", now: now) == "2026-10-30 09:30")
         #expect(DateText.normalize("tomorrow at 3pm", now: now) == "2026-10-27 15:00")
         #expect(DateText.normalize("not a date", now: now) == nil)
+        #expect(DateText.normalize("demain", now: now) == "2026-10-27")
+        #expect(DateText.normalize("demain 15h", now: now) == "2026-10-27 15:00")
+        #expect(DateText.normalize("demain à 9h30", now: now) == "2026-10-27 09:30")
         #expect(DateText.strict("tomorrow") == nil)
         #expect(DateText.strict("2026-10-27")?.hasTime == false)
     }
@@ -365,15 +368,24 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
             PlannedStep(tool: "action:mail_send", args: ["to=Paul", "subject=Hi"]),
             PlannedStep(tool: "action:message_send", args: ["to=Paul Roy", "text=hi"]),
             PlannedStep(tool: "action:mail_send", args: ["to=Zed", "subject=Hi"]),
+            PlannedStep(tool: "action:mail_send", args: ["to=Marie Dupont <marie@example.com>, ghost@example.com", "subject=Hi"]),
+            PlannedStep(tool: "action:message_send", args: ["to=+1 514 555 0000", "text=hi"]),
             PlannedStep(tool: "command", args: ["echo", "Marie"]),
         ]
-        let r = await Recipes.resolveRecipients(steps, contacts: contacts)
+        let said = "email Marie and x@y.com, call marie, and write to Paul, Paul Roy and Zed"
+        let r = await Recipes.resolveRecipients(steps, contacts: contacts, said: said)
         #expect(r.steps.map(\.args) == [["to=Marie Dupont <marie@example.com>, x@y.com", "subject=Hi"],
                                         ["to=Marie Dupont <+1 514 555 0199>"], ["echo", "Marie"]])
-        #expect(r.refusals.count == 3)
+        #expect(r.refusals.count == 6)
         #expect(r.refusals[0].contains("matches 2 contacts"))
         #expect(r.refusals[1].contains("has several addresses"))
         #expect(r.refusals[2].contains("isn't in Contacts"))
+        // Addresses the model wrote must have been said too.
+        #expect(r.refusals[3] == "marie@example.com wasn't mentioned in this conversation; who should get it?")
+        #expect(r.refusals[4].hasPrefix("ghost@example.com wasn't mentioned"))
+        #expect(r.refusals[5].hasPrefix("+1 514 555 0000 wasn't mentioned"))
+        #expect(Recipes.mentioned("5145550199", in: "my number is +1 (514) 555-0199"))
+        #expect(Recipes.mentioned("andré", in: "write to Andre"))
     }
 
     @Test func calendarAddIsUndoableAndListIsSorted() async throws {
@@ -476,6 +488,72 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
     }
 
     // MARK: chat
+
+    func chatEngine(_ model: ScriptedModel) throws -> (ChatEngine, GraphStore) {
+        let graph = try GraphStore(path: tmp + "/bibi.db")
+        let harness = Harness(skills: [], store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph, apps: testApps(tmp)) { model }
+        return (ChatEngine(harness: harness, graph: graph, embedder: NoEmbedder()), graph)
+    }
+
+    @Test func refusedStepsAreRepairedByTheModel() async throws {
+        let address = "michel_roberge@msn.com"
+        // The model first invents a recipient and leaves the email empty, then fixes both from the problems.
+        let model = ScriptedModel([
+            "ChatTurn": [turn("send email", reply: "I'll send it.", steps: [("action:mail_send", ["to=Marie"])]),
+                         turn("send email", reply: "I'll send it.", steps: [("action:mail_send", ["to=\(address)", "subject=Repo",
+                                                                                                 "body=Regarde https://github.com/michelroberge/bibi-fm"])])],
+            "Compact": [compactAnswer],
+        ])
+        let (chat, _) = try chatEngine(model)
+        let run = try chat.start()
+        let events = Events()
+        await chat.send(run, "envois un email à \(address) en lui disant d'aller regarder https://github.com/michelroberge/bibi-fm", emit: events.emit)
+        #expect(model.count("ChatTurn") == 2)
+        #expect(model.last("ChatTurn").contains("Problem: Marie wasn't mentioned in this conversation"))
+        #expect(model.last("ChatTurn").contains("Problem: mail_send: the email has no text yet"))
+        let state = chat.state(run)
+        let action = try #require(run.report()?.findings.first { $0.id == state.pending }?.recommendations.first)
+        #expect(action.call.params["to"] == address)
+        #expect(action.kind == "outbound")
+        #expect(state.draft == nil)
+        #expect(!chat.transcript(run).contains { $0.role == "note" })
+    }
+
+    @Test func whatOnlyTheUserKnowsBecomesAQuestion() async throws {
+        let empty = turn("send email", reply: "I'll send it.", steps: [("action:mail_send", ["to=bob@example.com"])])
+        let model = ScriptedModel([
+            "ChatTurn": [empty, empty, empty,
+                         turn("send email", reply: "I'll send it.", steps: [("action:mail_send", ["to=bob@example.com", "subject=Lunch", "body=Lunch at noon?"])])],
+            "Compact": [compactAnswer],
+        ])
+        let (chat, _) = try chatEngine(model)
+        let run = try chat.start()
+        await chat.send(run, "email bob@example.com", emit: Events().emit)
+        #expect(model.count("ChatTurn") == 3)  // the request and two repairs
+        let asked = try #require(chat.transcript(run).last)
+        #expect(asked.role == "bibi" && asked.text.hasPrefix("I need a bit more before I can do this"))
+        #expect(chat.state(run).draft?.contains("Step: action:mail_send") == true)
+
+        await chat.send(run, "ask him about lunch at noon", emit: Events().emit)
+        #expect(model.last("ChatTurn").contains("Unfinished request"))
+        #expect(model.last("ChatTurn").contains("Problem: mail_send: the email has no text yet"))
+        let state = chat.state(run)
+        #expect(state.pending != nil)
+        #expect(state.draft == nil)
+    }
+
+    @Test func aQuestionFromTheModelIsKept() async throws {
+        let model = ScriptedModel([
+            "ChatTurn": [turn("call", reply: "", steps: [("action:facetime_call", ["to=Paul"])]),
+                         turn("call", reply: "Quel Paul veux-tu appeler ?")],
+            "Compact": [compactAnswer],
+        ])
+        let (chat, _) = try chatEngine(model)
+        let run = try chat.start()
+        await chat.send(run, "appelle Paul", emit: Events().emit)
+        #expect(chat.transcript(run).last?.text == "Quel Paul veux-tu appeler ?")
+        #expect(chat.state(run).draft?.contains("Paul isn't in Contacts") == true)
+    }
 
     @Test func chatOffersBuiltInsAndDiscoveredApps() throws {
         let graph = try GraphStore(path: tmp + "/bibi.db")

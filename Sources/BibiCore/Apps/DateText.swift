@@ -27,9 +27,16 @@ public enum DateText {
         if let s = strict(text) { return s }
         let lower = text.lowercased().trimmingCharacters(in: .whitespaces)
         let cal = Calendar.current
-        let day = ["today": 0, "tonight": 0, "tomorrow": 1, "yesterday": -1][lower]
+        let day = ["today": 0, "tonight": 0, "tomorrow": 1, "yesterday": -1,
+                   "aujourd'hui": 0, "ce soir": 0, "demain": 1, "après-demain": 2, "hier": -1][lower.replacingOccurrences(of: "’", with: "'")]
         if let day, let d = cal.date(byAdding: .day, value: day, to: cal.startOfDay(for: now)) {
-            return lower == "tonight" ? (cal.date(byAdding: .hour, value: 20, to: d)!, true) : (d, false)
+            return ["tonight", "ce soir"].contains(lower) ? (cal.date(byAdding: .hour, value: 20, to: d)!, true) : (d, false)
+        }
+        // "demain 15h", "demain à 9h30": a day word and a time.
+        if let m = Re.all(#"^(aujourd'hui|demain|today|tomorrow)\s+(?:à\s+|at\s+)?(\d{1,2})(?:h|:)(\d{2})?$"#,
+                          lower.replacingOccurrences(of: "’", with: "'")).first, m.count == 4,
+           let base = parse(m[1], now: now), let h = Int(m[2]), h < 24 {
+            return (cal.date(bySettingHour: h, minute: Int(m[3]) ?? 0, second: 0, of: base.date)!, true)
         }
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue),
               let m = detector.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),

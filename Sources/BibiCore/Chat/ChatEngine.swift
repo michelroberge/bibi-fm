@@ -309,6 +309,11 @@ public final class ChatEngine: Sendable {
         let people = await Recipes.resolveRecipients(steps, contacts: harness.apps.contacts, said: said)
         var plan = planner.bind(people.steps)
         plan.refusals = people.refusals + plan.refusals
+        // A step dropped for its recipient may have other problems too: report them now, so one repair fixes all.
+        for s in people.dropped {
+            if case .failure(let e) = planner.bind(s), !e.description.contains("is not an email address"),
+               !e.description.contains("is not a phone number") { plan.refusals.append(e.description) }
+        }
         let earlier = Set((run.report()?.actions ?? []).map { JSON.string($0.call) })
         plan.actions.removeAll { earlier.contains(JSON.string($0.call)) }
         return plan

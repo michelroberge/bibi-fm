@@ -65,11 +65,23 @@ public enum Recipes {
         "action:mail_send": (["to", "cc", "bcc"], false), "action:message_send": (["to"], true), "action:facetime_call": (["to"], true),
     ]
 
+    /// True if the user (or a result in the conversation) mentioned this name, address or number: small models
+    /// copy example names and invent addresses, and an outbound step must only reach someone the user meant.
+    static func mentioned(_ value: String, in said: String) -> Bool {
+        if isPhone(value) && !isEmail(value) {
+            let digits = value.filter(\.isNumber)
+            return Re.all(#"\+?[0-9][0-9 ().-]{4,}[0-9]"#, said).compactMap(\.first).map { $0.filter(\.isNumber) }
+                .contains { $0.hasSuffix(digits) || digits.hasSuffix($0) && $0.count >= 7 }
+        }
+        return said.range(of: value, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    }
+
     /// Replaces names in recipient parameters with the one address Contacts has for them, so the approval card
-    /// shows exactly who gets the message or call. A step whose name doesn't resolve to exactly one address is
-    /// dropped with the reason.
-    public static func resolveRecipients(_ steps: [PlannedStep], contacts: any ContactStore) async -> (steps: [PlannedStep], refusals: [String]) {
-        var out: [PlannedStep] = [], refusals: [String] = []
+    /// shows exactly who gets the message or call. A step whose recipient wasn't mentioned in `said`, or whose
+    /// name doesn't resolve to exactly one address, is dropped with the reason.
+    public static func resolveRecipients(_ steps: [PlannedStep], contacts: any ContactStore, said: String) async
+        -> (steps: [PlannedStep], refusals: [String], dropped: [PlannedStep]) {
+        var out: [PlannedStep] = [], refusals: [String] = [], dropped: [PlannedStep] = []
         for var s in steps {
             guard let spec = people[s.tool] else { out.append(s); continue }
             if s.args.count == 1, !s.args[0].contains("="), let main = mainParam[String(s.tool.dropFirst(7))] { s.args[0] = main + "=" + s.args[0] }
@@ -79,6 +91,10 @@ public enum Recipes {
                 var resolved: [String] = []
                 for item in list(String(a[a.index(after: eq)...])) {
                     let v = address(item).value
+                    guard mentioned(v, in: said) else {
+                        why.append("\(v) wasn't mentioned in this conversation; who should get it?")
+                        continue
+                    }
                     if isEmail(v) || (spec.phone && isPhone(v)) { resolved.append(item); continue }
                     switch await lookup(v, phone: spec.phone, contacts: contacts) {
                     case .success(let r): resolved.append(r)
@@ -87,9 +103,9 @@ public enum Recipes {
                 }
                 s.args[i] = String(a[...eq]) + resolved.joined(separator: ", ")
             }
-            if why.isEmpty { out.append(s) } else { refusals += why }
+            if why.isEmpty { out.append(s) } else { refusals += why; dropped.append(s) }
         }
-        return (out, refusals)
+        return (out, refusals, dropped)
     }
 
     static func lookup(_ name: String, phone: Bool, contacts: any ContactStore) async -> Result<String, ActionError> {
@@ -159,11 +175,13 @@ public struct MailSend: ActionSpec {
                 return a
             }
         }
-        let m = Message(to: try parse("to"), cc: try parse("cc"), bcc: try parse("bcc"), subject: p["subject"] ?? "",
-                        body: p["body"] ?? "", from: p["from"].flatMap { $0.isEmpty ? nil : Recipes.address($0).value })
+        // The text first: a step whose recipient is also wrong still says what else is missing.
+        let subject = p["subject"] ?? "", body = p["body"] ?? ""
+        guard !subject.isEmpty || !body.isEmpty else { throw ActionError("mail_send: the email has no text yet (body= and subject=)") }
+        guard body.count <= 50_000 else { throw ActionError("mail_send: the body is too long") }
+        let m = Message(to: try parse("to"), cc: try parse("cc"), bcc: try parse("bcc"), subject: subject, body: body,
+                        from: p["from"].flatMap { $0.isEmpty ? nil : Recipes.address($0).value })
         guard !m.to.isEmpty else { throw ActionError("mail_send: missing parameter to") }
-        guard !m.subject.isEmpty || !m.body.isEmpty else { throw ActionError("mail_send: the email has no subject and no body") }
-        guard m.body.count <= 50_000 else { throw ActionError("mail_send: the body is too long") }
         if let f = m.from, !Recipes.isEmail(f) { throw ActionError("from: \(f) is not an email address") }
         return m
     }
@@ -489,10 +507,10 @@ public struct MessageSend: ActionSpec {
     public init() {}
 
     func message(_ p: Params) throws -> (to: (name: String?, value: String), text: String) {
-        let a = Recipes.address(try require(p, "to"))
-        guard Recipes.isEmail(a.value) || Recipes.isPhone(a.value) else { throw ActionError("message_send: \(a.value) is not a phone number or address") }
         let text = try require(p, "text")
         guard text.count <= 5000 else { throw ActionError("message_send: the message is too long") }
+        let a = Recipes.address(try require(p, "to"))
+        guard Recipes.isEmail(a.value) || Recipes.isPhone(a.value) else { throw ActionError("message_send: \(a.value) is not a phone number or address") }
         return (a, text)
     }
 

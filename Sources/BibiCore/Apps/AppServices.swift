@@ -91,14 +91,21 @@ public struct SystemContacts: ContactStore {
 
     public func find(_ query: String) async throws -> [ContactCard] {
         let store = CNContactStore()
-        guard try await store.requestAccess(for: .contacts) else {
-            throw ActionError("bibi can't read Contacts: allow it in System Settings > Privacy & Security > Contacts")
+        switch CNContactStore.authorizationStatus(for: .contacts) {
+        case .notDetermined:
+            guard (try? await store.requestAccess(for: .contacts)) == true else { throw Permissions.denied("Contacts") }
+        case .denied, .restricted: throw Permissions.denied("Contacts")
+        default: break
         }
         let keys = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactNicknameKey, CNContactOrganizationNameKey,
                     CNContactEmailAddressesKey, CNContactPhoneNumbersKey] as [CNKeyDescriptor]
         let predicate = query.contains("@") ? CNContact.predicateForContacts(matchingEmailAddress: query)
                                             : CNContact.predicateForContacts(matchingName: query)
-        return try store.unifiedContacts(matching: predicate, keysToFetch: keys).compactMap { c in
+        let all: [CNContact]
+        do { all = try store.unifiedContacts(matching: predicate, keysToFetch: keys) } catch let e as CNError where e.code == .authorizationDenied {
+            throw Permissions.denied("Contacts")
+        }
+        return all.compactMap { c in
             let full = [c.givenName, c.familyName].filter { !$0.isEmpty }.joined(separator: " ")
             let card = ContactCard(
                 name: full.ifEmpty(c.organizationName),
@@ -108,6 +115,15 @@ public struct SystemContacts: ContactStore {
             let names = [full, c.givenName, c.familyName, c.nickname, c.organizationName]
             return query.contains("@") || names.contains(where: { Contacts.same($0, query) }) ? card : nil
         }
+    }
+}
+
+enum Permissions {
+    /// What to do when macOS said no (or never asked because bibi wasn't its own responsible process).
+    static func denied(_ what: String) -> ActionError {
+        ActionError("bibi isn't allowed to use \(what). Run `bibi apps permissions` and allow it, or turn on bibi under "
+                    + "System Settings > Privacy & Security > \(what). If bibi isn't listed there, restart `bibi ui` from the "
+                    + "latest build so macOS can ask.")
     }
 }
 
@@ -163,13 +179,15 @@ public struct EventKitStore: CalendarStore {
     public init() {}
 
     func store(_ type: EKEntityType) async throws -> EKEventStore {
-        let s = EKEventStore()
-        let granted = type == .event ? try await s.requestFullAccessToEvents() : try await s.requestFullAccessToReminders()
-        guard granted else {
-            let what = type == .event ? "Calendars" : "Reminders"
-            throw ActionError("bibi can't use \(what): allow it in System Settings > Privacy & Security > \(what)")
+        let s = EKEventStore(), what = type == .event ? "Calendars" : "Reminders"
+        switch EKEventStore.authorizationStatus(for: type) {
+        case .fullAccess: return s
+        case .notDetermined:
+            let granted = type == .event ? try? await s.requestFullAccessToEvents() : try? await s.requestFullAccessToReminders()
+            guard granted == true else { throw Permissions.denied(what) }
+            return s
+        default: throw Permissions.denied(what)
         }
-        return s
     }
 
     func calendar(_ s: EKEventStore, _ name: String?, _ type: EKEntityType) throws -> EKCalendar? {
