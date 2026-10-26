@@ -166,7 +166,7 @@ Built in (fixed scripts and Apple frameworks, so they behave the same every time
 
 **Permissions.** macOS asks once for each: Calendars, Reminders, Contacts, and Automation for each app bibi controls. Run `bibi apps permissions` to answer the dialogs up front; you can change them later in System Settings > Privacy & Security.
 
-macOS normally charges a permission to the app a program was started from (Terminal, VS Code…), and those apps carry no Contacts or Calendars text, so macOS would refuse without asking. `bibi ui` and `bibi apps` therefore relaunch themselves as their own "responsible process": macOS asks on behalf of **bibi** and remembers the answer for bibi. The binary is ad-hoc signed, so after a rebuild macOS may ask again.
+macOS normally charges a permission to the app a program was started from (Terminal, VS Code…), and those apps carry no Contacts or Calendars text, so macOS would refuse without asking. `bibi ui` and `bibi apps` therefore relaunch themselves as their own "responsible process": macOS asks on behalf of **bibi** and remembers the answer for bibi. macOS keeps those answers per code identity. A plain build is ad-hoc signed and gets a new identity each time, so macOS forgets them after every rebuild. Run `make signing-identity` once: it creates a self-signed "bibi local code signing" certificate in your login keychain, and `make build`, `make install` and `bin/bibi` then sign bibi with it, so the permissions stay. Remove it with `security delete-identity -c "bibi local code signing"`.
 
 ## How bibi learns skills
 

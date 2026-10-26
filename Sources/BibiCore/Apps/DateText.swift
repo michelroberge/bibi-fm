@@ -46,6 +46,38 @@ public enum DateText {
         return (hasTime ? date : cal.startOfDay(for: date), hasTime)
     }
 
+    /// The date the user's own words give in a whole sentence ("rappelle-moi demain à 9h", "tomorrow at 3pm",
+    /// "vendredi", "à 19h"), or nil if they give none. The first time named is the one used ("de 9h à 10h" → 9:00).
+    public static func find(in text: String, now: Date = Date()) -> (date: Date, hasTime: Bool)? {
+        let t = text.lowercased().replacingOccurrences(of: "’", with: "'")
+            .replacingOccurrences(of: #"\S+://\S+|\S+@\S+"#, with: " ", options: .regularExpression)
+        let cal = Calendar.current, today = cal.startOfDay(for: now)
+        var day: Date?
+        let words: [(String, Int)] = [("après-demain", 2), ("apres-demain", 2), ("aujourd'hui", 0), ("demain", 1), ("ce soir", 0),
+                                      ("tonight", 0), ("today", 0), ("tomorrow", 1)]
+        if let (_, n) = words.first(where: { t.contains($0.0) }) { day = cal.date(byAdding: .day, value: n, to: today) }
+        let weekdays = [["sunday", "dimanche"], ["monday", "lundi"], ["tuesday", "mardi"], ["wednesday", "mercredi"],
+                        ["thursday", "jeudi"], ["friday", "vendredi"], ["saturday", "samedi"]]
+        if day == nil, let i = weekdays.firstIndex(where: { $0.contains { Re.test("\\b\($0)\\b", t) } }) {
+            day = cal.nextDate(after: today, matching: DateComponents(weekday: i + 1), matchingPolicy: .nextTime)
+        }
+        var hour: Int?, minute = 0
+        if let m = Re.all(#"(?<![\d/:.-])(\d{1,2})\s*(?::|h)\s*(\d{2})?(?!\d)|(?<![\d/:.-])(\d{1,2})\s*(am|pm)\b"#, t).first {
+            if !m[1].isEmpty, let h = Int(m[1]) { hour = h; minute = Int(m[2]) ?? 0 }
+            else if let h = Int(m[3]) { hour = h % 12 + (m[4] == "pm" ? 12 : 0) }
+        } else if Re.test(#"\b(midi|noon)\b"#, t) { hour = 12 }
+        else if Re.test(#"\b(minuit|midnight)\b"#, t) { hour = 0 }
+        else if Re.test("ce soir|tonight", t) { hour = 20 }
+        if let h = hour, h < 24, minute < 60 {
+            var d = cal.date(bySettingHour: h, minute: minute, second: 0, of: day ?? today)!
+            // "à 19h" with no day: today, or tomorrow once that time has passed.
+            if day == nil && d < now { d = cal.date(byAdding: .day, value: 1, to: d)! }
+            return (d, true)
+        }
+        if let day { return (day, false) }
+        return nil
+    }
+
     public static func format(_ d: Date, time: Bool) -> String {
         formatter(time ? "yyyy-MM-dd HH:mm" : "yyyy-MM-dd").string(from: d)
     }

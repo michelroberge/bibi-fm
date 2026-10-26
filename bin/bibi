@@ -9,4 +9,5 @@ while [ -L "$SOURCE" ]; do
 done
 REPO="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 swift build --package-path "$REPO" --product bibi >&2 | grep -v "^\[" >&2 || true
+"$REPO/scripts/sign.sh" "$REPO/.build/debug/bibi"
 exec "$REPO/.build/debug/bibi" "$@"
