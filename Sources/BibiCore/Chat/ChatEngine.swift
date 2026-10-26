@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 /// Where chat sends what happens: (type, text). Types: message (a ChatMessage as JSON), delta (the reply so far),
 /// candidate (a learned-skill candidate as JSON), progress/info/ok/error/heading (from running steps).
@@ -86,6 +87,13 @@ public final class ChatEngine: Sendable {
         .init("reply", .string, "your answer from the results"),
     ])
 
+    static let translateInstructions = """
+    Translate the user's message to English. Keep names, email addresses, URLs, paths, numbers and quoted text exactly as written.
+    Translate only: don't answer it or add anything.
+    """
+
+    static let translateSchema = Schema("Translate", [.init("english", .string, "the message in English")])
+
     static let compactSchema = Schema("Compact", [
         .init("summary", .string, "at most 120 words"),
         .init("facts", .array(.object(Schema("Fact", [.init("subject", .string, "a few words"), .init("statement", .string, "one sentence")])), max: 5)),
@@ -168,19 +176,28 @@ public final class ChatEngine: Sendable {
         let previous = state.pending
         state.pending = nil
         say(run, &state, ChatMessage("user", question), emit)
-        await think(run, &state, question: question, previous: previous, emit: emit)
+        let english = await english(run, question)
+        await think(run, &state, question: question, english: english, previous: previous, emit: emit)
         await compact(run, &state)
         save(run, state)
     }
 
     /// One model turn. `question` is nil for the follow-up that answers from results.
-    func think(_ run: RunRecord, _ state: inout ChatState, question: String?, previous: String? = nil, emit: @escaping ChatEmit) async {
+    /// `english` is the request in English, for retrieval: examples, facts and embeddings are in English.
+    func think(_ run: RunRecord, _ state: inout ChatState, question: String?, english: String? = nil, previous: String? = nil,
+               emit: @escaping ChatEmit) async {
         let focus = question ?? state.recent.last(where: { $0.role == "user" })?.text ?? ""
-        let v = embedder.vector(focus)
+        // The follow-up answers the request whose intent node holds its English.
+        let topic = english ?? (question == nil ? state.intent.flatMap { graph.node($0)?.text } : nil) ?? focus
+        // Tool hints have words in both languages: match the message as written and its translation.
+        let words = topic == focus ? focus : focus + "\n" + topic
+        let v = embedder.vector(topic)
         harness.apps.catalog.refresh(graph: graph)
-        let skills = rankSkills(focus, v)
-        let shown = question == nil ? [] : exampleIntents(focus)
-        var tools = toolCatalog(skills, request: focus, examples: shown, vector: v)
+        let skills = rankSkills(topic, v)
+        // Only the tools the message's own words select: an example's tools ("bibi" recalls a reminder) aren't a topic.
+        let worded = toolCatalog(skills, request: words, examples: [], vector: v).ids
+        let shown = question == nil ? [] : exampleIntents(topic, tools: worded)
+        var tools = toolCatalog(skills, request: words, examples: shown, vector: v)
 
         // An unfinished request from the last turn: the user's message may be the missing piece, unless it asks for
         // something else (then the old request would only drag the model back to it).
@@ -190,12 +207,10 @@ public final class ChatEngine: Sendable {
         // only the fields it gives ("make the subject shorter"). A message about something else leaves them alone.
         let open = question == nil ? [] : openForms(run, previous)
         let form = open.map(Self.formText).joined(separator: "\n")
-        // Only the tools the message's own words select: an example's tools ("bibi" recalls a reminder) aren't a topic.
-        let worded = toolCatalog(skills, request: focus, examples: [], vector: v).ids
         let editing = open.isEmpty || !Self.continues(form, tools: worded) ? [] : open
         if !editing.isEmpty {
             // The card's own actions are always available while it is being filled in ("mets le sujet…" names no tool).
-            var t = toolCatalog(skills, request: focus, examples: [], vector: v)
+            var t = toolCatalog(skills, request: words, examples: [], vector: v)
             for a in editing where !t.ids.contains("action:" + a.call.spec) {
                 t.ids.append("action:" + a.call.spec)
                 if let spec = harness.registry.spec(a.call.spec) {
@@ -210,7 +225,7 @@ public final class ChatEngine: Sendable {
         ctx.add("Now", DateText.formatter("EEEE yyyy-MM-dd HH:mm").string(from: Date()), priority: 0)
         ctx.add("Tools", tools.text, priority: 0, maxChars: 2500)
         ctx.add("Conversation so far", editing.isEmpty ? state.summary : "", priority: 3, maxChars: 1200)
-        let known = facts(focus, v)
+        let known = facts(topic, v)
         ctx.add("Known facts", known, priority: 4, maxChars: 600)
         // While a card is being filled in, past requests would only lend it their content.
         if question != nil && editing.isEmpty {
@@ -244,12 +259,14 @@ public final class ChatEngine: Sendable {
 
         if let question {
             let id = "intent:\(run.id)-\(state.turns)"
-            graph.upsert(GraphNode(id: id, kind: "intent", name: phrase, text: question,
+            // The English text is what later requests are matched against; the question keeps the user's words.
+            graph.upsert(GraphNode(id: id, kind: "intent", name: phrase, text: topic,
                                    props: ["question": .string(question), "intent": .string(phrase), "conversation": .string(run.id)]))
             if let iv = embedder.vector(phrase) { graph.setVector(id, iv) }
             graph.link("conversation:" + run.id, id, "contains")
             graph.record("asked", node: id, conversation: run.id)
             state.intent = id
+            state.asked = worded
         }
 
         // People and addresses must come from the conversation (or Contacts), never from the model's imagination.
@@ -259,6 +276,13 @@ public final class ChatEngine: Sendable {
         for attempt in 0...Self.repairs where !steps.isEmpty {
             tried = steps
             plan = await bind(steps, run: run, said: said, request: question ?? focus, editing: editing)
+            // What was asked for was refused and only steps the request didn't ask for are left (an example's
+            // "reveal"): that is nothing runnable, so the model gets to repair the step that matters.
+            if editing.isEmpty, !plan.refusals.isEmpty, !plan.actions.isEmpty,
+               plan.actions.allSatisfy({ Self.unasked("action:" + $0.call.spec, worded) }) {
+                plan.refusals += plan.actions.map { "\($0.call.spec): not part of this request; leave it out" }
+                plan.actions = []
+            }
             if best.map({ Self.score(plan) > Self.score($0.plan) }) ?? true { best = (plan, steps) }
             let drafts = plan.actions.filter { $0.problems != nil }
             // Nothing runnable: up to two repairs. A draft with gaps: one, in case the request already fills them.
@@ -335,6 +359,11 @@ public final class ChatEngine: Sendable {
     static let repairs = 2
 
     /// How good a bound plan is: runnable actions first, then fewer gaps and refusals.
+    /// A built-in app action the request's words didn't select: an example brought it in, not the request.
+    static func unasked(_ tool: String, _ worded: [String]) -> Bool {
+        tool.hasPrefix("action:") && actionHints[String(tool.dropFirst(7))] != nil && !worded.contains(tool)
+    }
+
     static func score(_ p: Planner.Result) -> Int {
         let ready = p.actions.filter { $0.problems == nil }.count
         let gaps = p.actions.reduce(0) { $0 + ($1.problems?.count ?? 0) }
@@ -597,14 +626,29 @@ public final class ChatEngine: Sendable {
         .sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
     }
 
+    /// The request in English (retrieval, examples and embeddings are English), or the request itself when it
+    /// already is or the model can't translate it.
+    func english(_ run: RunRecord, _ text: String) async -> String {
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(text)
+        // Short or mixed messages ("ok", "try again") stay as they are: a guess would only cost a model call.
+        guard let (lang, p) = recognizer.languageHypotheses(withMaximum: 1).first, lang != .english, p >= 0.5,
+              let r = try? await model(run).respond(text, instructions: prompts.text("chat.translate", default: Self.translateInstructions),
+                                                     schema: Self.translateSchema),
+              let t = r["english"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return text }
+        return Text.clip(t, max: 2000)
+    }
+
     /// Up to three requests that worked (learned or seeded) sharing words with this one, best first; learned
-    /// ones win ties and frequently matched ones rank higher.
-    func exampleIntents(_ text: String) -> [GraphNode] {
-        let terms = Similarity.terms(text)
+    /// ones win ties and frequently matched ones rank higher. One shared word is chance (a name, "repo") unless
+    /// the example used a tool this request's own words select (its `used` edges in the graph).
+    func exampleIntents(_ text: String, tools: [String]) -> [GraphNode] {
+        let terms = Similarity.terms(text), selected = Set(tools).subtracting(["command"])
         let ranked = graph.nodes(kind: "intent").filter { $0.props["outcome"]?.string == "ok" }
             .compactMap { n -> (GraphNode, Double)? in
                 let hits = terms.intersection(Similarity.terms(n.text)).count
-                guard hits > 0 else { return nil }
+                let answered = Set(graph.edges(from: n.id, kind: "used").map(\.dst) + SkillMiner.steps(n).map(\.tool))
+                guard hits >= 2 || hits == 1 && !answered.isDisjoint(with: selected) else { return nil }
                 let used = graph.edges(from: n.id, kind: "matched").reduce(0) { $0 + $1.weight }
                 return (n, Double(hits) + (n.props["seed"] == nil ? 0.5 : 0) + min(1, used / 10))
             }
@@ -729,7 +773,9 @@ public final class ChatEngine: Sendable {
         if let next { state.pending = next }
 
         if !d.dryRun, let intent = state.intent {
+            // A step the request didn't ask for (an example's "reveal") ran, but it isn't how this request is answered.
             let worked = approved.filter { a in results.contains { $0.actionID == a.id && $0.ok } }.map(PlannedStep.from)
+                .filter { s in state.asked.map { !Self.unasked(s.tool, $0) } ?? true }
             if !worked.isEmpty {
                 await learn(intent, worked, owner: owner, run: run, state: &state, emit: emit)
             }
@@ -845,6 +891,11 @@ public final class ChatEngine: Sendable {
         }
         graph.strengthen(intent, owner, "matched")
         graph.strengthen(owner, intent, "example")
+        // Which actions and skills answered it: retrieval follows these, and they show what an example teaches.
+        for tool in Set(worked.map(\.tool)) {
+            let node = tool.hasPrefix("skill:") ? GraphSync.skillID(String(tool.dropFirst(6))) : tool
+            if graph.node(node) != nil { graph.strengthen(intent, node, "used") }
+        }
         let miner = SkillMiner(graph: graph, model: model(run), prompts: prompts)
         guard let c = await miner.observe(intent) else { return }
         state.candidates.append(c.id)
@@ -859,25 +910,27 @@ public final class ChatEngine: Sendable {
     /// Folds messages older than the last few into the summary and stores durable facts in the graph.
     func compact(_ run: RunRecord, _ state: inout ChatState) async {
         guard state.recent.count > Self.keepMessages else { return }
-        let old = state.recent.dropLast(Self.keepMessages)
+        let msgs = Array(state.recent.dropLast(Self.keepMessages))
         state.recent = Array(state.recent.suffix(Self.keepMessages))
-        let lines = old.map { m in
+        let line = { (m: ChatMessage) in
             "\(["user": "User", "bibi": "bibi", "result": "Result", "note": "Note"][m.role] ?? m.role): \(Text.clip(m.text, max: 500))"
-        }.joined(separator: "\n")
+        }
+        let lines = msgs.map(line).joined(separator: "\n")
+        // Messages bibi answered with a proposal are requests: what someone wanted, not evidence that it happened
+        // ("an email was sent" when only a Finder window opened).
+        let asked = Set(msgs.indices.filter { i in
+            msgs[i].role == "user" && msgs[(i + 1)...].first(where: { $0.role == "bibi" })?.finding != nil
+        })
+        // Facts are checked against what was said and seen, never against the summary the model just wrote.
+        let source = msgs.indices.filter { !asked.contains($0) }.map { line(msgs[$0]) }.joined(separator: "\n") + "\n" + state.summary
         let prompt = "Summary so far:\n\(state.summary.ifEmpty("(none)"))\n\nNew messages:\n\(lines)"
         if let r = try? await model(run).respond(prompt, instructions: prompts.text("chat.compact", default: Self.compactInstructions),
                                                  schema: Self.compactSchema),
            let s = r["summary"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
             state.summary = Text.clip(s, max: 1200)
-            let source = lines + "\n" + state.summary
             for f in r["facts"]?.array ?? [] {
-                // A "fact" that mostly repeats a message bibi answered with a proposal is that request, in any language.
-                let msgs = Array(old)
-                let asked = msgs.indices.filter { i in
-                    msgs[i].role == "user" && msgs[(i + 1)...].first(where: { $0.role == "bibi" })?.finding != nil
-                }.map { msgs[$0].text }
                 if let subject = f["subject"]?.string, let statement = f["statement"]?.string, Self.grounded(statement, in: source),
-                   !asked.contains(where: { Similarity.jaccard($0, statement) >= 0.6 }) {
+                   !asked.contains(where: { Similarity.jaccard(msgs[$0].text, statement) >= 0.6 }) {
                     remember(subject, statement, conversation: run.id)
                 }
             }

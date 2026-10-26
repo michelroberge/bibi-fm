@@ -277,7 +277,12 @@ public enum Similarity {
     }
 
     static let stopwords: Set<String> = ["the", "a", "an", "my", "of", "to", "in", "on", "for", "is", "are", "what", "how", "me",
-                                         "and", "or", "do", "i", "it", "this", "that", "please", "can", "you", "with", "much", "many"]
+                                         "and", "or", "do", "i", "it", "this", "that", "please", "can", "you", "with", "much", "many",
+                                         // French: one shared "le" made a copy-paste question an example for an email.
+                                         "le", "la", "les", "un", "une", "des", "du", "de", "au", "aux", "et", "ou", "est", "que",
+                                         "qui", "ce", "cet", "cette", "ces", "dans", "pour", "par", "sur", "avec", "pas", "ne", "en",
+                                         "il", "elle", "on", "je", "tu", "nous", "vous", "lui", "leur", "mon", "ma", "mes", "ton",
+                                         "ta", "son", "sa", "ses", "moi", "toi", "se"]
 
     /// Lowercase content words with a plural s removed.
     public static func terms(_ text: String) -> Set<String> {

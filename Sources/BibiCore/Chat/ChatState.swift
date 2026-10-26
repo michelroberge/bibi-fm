@@ -29,6 +29,9 @@ public struct ChatState: Codable, Sendable {
     public var intent: String?
     public var skill: String?
     public var guidance: String?
+    /// The tools the current request's own words selected: only steps using them (or commands and skills) are
+    /// learned as its answer, not a step an example brought in.
+    public var asked: [String]?
     /// Results of approved steps the model hasn't answered from yet.
     public var results: [String] = []
     /// Learned-skill candidates announced in this chat.

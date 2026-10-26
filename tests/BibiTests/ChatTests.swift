@@ -223,5 +223,53 @@ final class Events: @unchecked Sendable {
         #expect(throws: ActionError.self) { try chat.delete(try #require(harness.store.list(skill: "chat").first.map { _ in
             try harness.store.create(skill: "storage.optimize", args: [], online: false, version: "t") })) }
     }
+
+    @Test func unaskedLeftoversAreRepairedNotProposed() async throws {
+        let model = ScriptedModel(["ChatTurn": [
+            turn("send email", reply: "Email sent.", steps: [("action:mail_send", ["mail", "-s \"Repo\"", "to=bob@example.com"]),
+                                                             ("action:reveal", ["path=" + tmp])]),
+            turn("send email", reply: "What should the email say?"),
+        ]])
+        let (chat, _, graph) = engine(model)
+        // A past request sharing one word that answered with a step this request's words don't select.
+        graph.upsert(GraphNode(id: "intent:old", kind: "intent", name: "copy paste", text: "why does copy paste fail in cockpit",
+                               props: ["outcome": .string("ok"), "steps": .array([.object(["tool": .string("action:reveal"),
+                                                                                              "args": .strings(["path=" + tmp])])])]))
+        let run = try chat.start()
+        await chat.send(run, "send an email to bob@example.com about the cockpit repo", emit: Events().emit)
+        #expect(!model.last("ChatTurn").contains("why does copy paste"))
+        #expect(model.count("Translate") == 0)
+        // The email step was refused; the reveal alone isn't proposed: the model gets to repair the email instead.
+        #expect(run.report()?.actions.isEmpty ?? true)
+        #expect(model.count("ChatTurn") == 2)
+        #expect(model.last("ChatTurn").contains("reveal: not part of this request"))
+    }
+
+    @Test func requestsAreNotRememberedAsDone() async throws {
+        let claim: JSONValue = .object(["summary": .string("An email was sent."), "facts": .array([
+            .object(["subject": .string("email sent"), "statement": .string("An email was sent to bob@example.com about the repo.")]),
+        ])])
+        let model = ScriptedModel(["ChatTurn": [turn("send email", reply: "I'll check.", steps: [("command", ["echo", "hi"])])],
+                                   "Compact": [claim]])
+        let (chat, _, graph) = engine(model)
+        let run = try chat.start()
+        for _ in 0..<3 { await chat.send(run, "send an email to bob@example.com about the repo", emit: Events().emit) }
+        #expect(graph.nodes(kind: "fact").isEmpty)
+    }
+
+    @Test func requestsAreMatchedInEnglish() async throws {
+        let english = "send an email to bob@example.com to tell him to look at the repo"
+        let model = ScriptedModel(["Translate": [.object(["english": .string(english)])],
+                                   "ChatTurn": [turn("send email", reply: "What should it say?")]])
+        let (chat, _, graph) = engine(model)
+        let run = try chat.start()
+        let french = "envoie un courriel à bob@example.com pour lui dire d'aller voir le dépôt"
+        await chat.send(run, french, emit: Events().emit)
+        #expect(model.count("Translate") == 1)
+        let intent = try #require(graph.node(chat.state(run).intent ?? ""))
+        #expect(intent.text == english && intent.props["question"]?.string == french)
+        // The model still answers the user's own words.
+        #expect(model.last("ChatTurn").contains(french))
+    }
 }
 

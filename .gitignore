@@ -33,6 +33,15 @@ logs/
 *.log
 reports/
 
+# bibi's database (graph, facts, learned requests) and run data: personal, never committed
+*.db
+*.db-*
+*.db.bak*
+*.sqlite
+*.sqlite3
+runs/
+apps.json
+
 # macOS and editors
 .DS_Store
 .vscode/
