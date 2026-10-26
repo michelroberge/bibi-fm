@@ -116,6 +116,20 @@ class NetProbeTests(unittest.TestCase):
         self.assertEqual(name_hints("BRN008077.local"), ["Brother printer"])
         self.assertIn("iPhone", name_hints("Michels-iPhone.local"))
 
+    def test_linux_vm_signatures(self):
+        from bibi.skills.net.probe import os_from_ttl, signatures, vm_platform
+        ssh = "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5"
+        cockpit = 'Content-Security-Policy: connect-src \'self\'\n<html><head><title>Loading...</title>' \
+                  '<link href="cockpit/static/login.css"><script src="cockpit/static/login.js"></script>'
+        docker = "Server: Docker/27.3.1 (linux)\nApi-Version: 1.47\n{\"message\":\"page not found\"}"
+        found = signatures(ssh, cockpit, docker)
+        self.assertIn("Ubuntu Linux", found)
+        self.assertIn("Cockpit web console (Linux server admin)", found)
+        self.assertIn("Docker Engine API", found)
+        self.assertEqual(vm_platform("bc:24:11:d6:8e:c4"), "Proxmox VE (QEMU/KVM)")
+        self.assertIn("Linux", os_from_ttl(64))
+        self.assertIn("Windows", os_from_ttl(128))
+
 
 class AnalyzeTests(unittest.TestCase):
     def setUp(self):
