@@ -137,8 +137,76 @@ function proposal(f) {
         : h("span", { class: "pill" }, skipped.has(a.id) ? "skipped" : "not run"),
       h("code", { class: "muted" }, a.command))));
   }
-  return h("div", { class: "proposal" },
-    f.recommendations.map((a) => recommendation(a, v, id, dec, executed, rerenderChat)));
+  return h("div", { class: "proposal" }, f.recommendations.map((a) => {
+    const card = recommendation(a, v, id, dec, executed, rerenderChat);
+    const fields = v.actionInfo[a.id]?.fields || [];
+    if (!fields.length || executed.has(a.id)) return card;
+    card.append(draftForm(a, fields));
+    if (a.problems) {
+      // A draft with gaps can't be approved until they are filled in.
+      if (dec[a.id] === "approve") delete dec[a.id];
+      const approve = card.querySelector(".seg button");
+      if (approve) { approve.disabled = true; approve.title = "Fill in the missing fields first"; }
+    }
+    return card;
+  }));
+}
+
+// --- draft cards: an action's fields, editable before approving ------------------------------------
+const choiceCache = {};
+
+function draftForm(a, fields) {
+  const params = a.call.params || {}, problems = a.problems || {};
+  const form = h("div", { class: "draft" });
+  for (const f of fields) {
+    const value = params[f.key] ?? "";
+    let input;
+    if (f.kind === "longtext") {
+      input = h("textarea", { rows: 4, placeholder: f.placeholder || "" });
+      input.value = value;
+    } else if (f.kind === "bool") {
+      input = h("input", { type: "checkbox", checked: value === "true" });
+    } else if (f.kind === "choice") {
+      input = h("select", {}, h("option", { value: "" }, f.placeholder || "—"), value ? h("option", { value, selected: true }, value) : null);
+      fillChoices(input, f, value);
+    } else if (f.kind === "datetime") {
+      // Stored as "2026-10-27 15:00" (or a day alone); the picker wants "2026-10-27T15:00".
+      input = h("input", { type: "datetime-local", value: value.length > 10 ? value.replace(" ", "T") : value ? value + "T09:00" : "" });
+    } else {
+      input = h("input", { type: "text", value, placeholder: f.placeholder || "" });
+    }
+    input.addEventListener("change", () => editDraft(a.id, f.key, f.kind === "bool" ? String(input.checked) : input.value));
+    const problem = problems[f.key];
+    form.append(h("label", { class: "field" + (problem ? " bad" : "") },
+      h("span", {}, f.label, f.required ? h("span", { class: "muted" }, " *") : null), input,
+      problem ? h("small", { class: "problem" }, problem) : null));
+  }
+  if (problems[""]) form.append(h("div", { class: "result fail" }, problems[""]));
+  return form;
+}
+
+// Choices come from the apps (Mail accounts, calendars, lists) once per page, or from the field itself.
+function fillChoices(select, f, value) {
+  const add = (items) => {
+    for (const c of items) if (c.value !== value) select.append(h("option", { value: c.value }, c.label));
+    for (const o of select.options) if (o.value === value) o.textContent = items.find((c) => c.value === value)?.label || value;
+  };
+  if (f.options) return add(f.options.map((o) => ({ value: o, label: o })));
+  if (!f.source) return;
+  (choiceCache[f.source] ||= api("choices/" + encodeURIComponent(f.source))).then(add).catch((e) => {
+    delete choiceCache[f.source];
+    select.title = e.message;
+  });
+}
+
+async function editDraft(action, key, value) {
+  try {
+    await api(`chat/${encodeURIComponent(chatUI.id)}/edit`, { action, params: { [key]: value } });
+    chatUI.view = await api("chat/" + encodeURIComponent(chatUI.id));
+    rerenderChat();
+  } catch (e) {
+    document.getElementById("chatlog")?.append(h("div", { class: "msg note" }, e.message));
+  }
 }
 
 function rerenderChat() {

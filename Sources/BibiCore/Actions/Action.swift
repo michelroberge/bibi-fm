@@ -71,6 +71,8 @@ public struct BoundAction: Codable, Sendable, Identifiable {
     public var reversible: Bool
     /// What still needs filling in or fixing, by field key ("" = not about one field). nil: ready to approve.
     public var problems: [String: String]?
+    /// Fields the user typed on the card: a later chat turn doesn't overwrite them unless the user asks.
+    public var edited: [String]?
 
     public init(_ call: ActionCall, title: String, kind: String, target: String, bytes: Int = 0, safety: Int,
                 confidence: Int, reason: String, command: String, weight: Double = 1, privilege: Privilege = .user,

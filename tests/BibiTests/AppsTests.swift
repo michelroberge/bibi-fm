@@ -293,6 +293,16 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
                                       PlannedStep(tool: "action:reminder_add", args: ["title=a"]),
                                       PlannedStep(tool: "action:reminder_add", args: ["title=b"])])
         #expect(merged.map(\.args) == [["title=a", "due=2036-01-01"], ["title=b"]])
+        // Agreeing on what they share, two halves of one email are one step; placeholders are no value.
+        let mail = Planner.prepare([PlannedStep(tool: "action:mail_send", args: ["to=a@b.co", "subject=Hi", "cc=..."]),
+                                    PlannedStep(tool: "action:mail_send", args: ["to=a@b.co", "body=Hello", "from=…"])])
+        #expect(mail.map(\.args) == [["to=a@b.co", "subject=Hi", "body=Hello"]])
+        // An action written as a command is the action.
+        let planner = Planner(registry: ActionRegistry(Builtins.all), env: env(testApps(tmp)), skill: { _ in nil })
+        let a = try? planner.bind(PlannedStep(tool: "command", args: ["mail_send", "to=a@b.co", "body=Hi"])).get()
+        #expect(a?.first?.call.spec == "mail_send")
+        // Skills and discovered apps don't make a message a new topic.
+        #expect(ChatEngine.continues("Step: action:mail_send []", tools: ["command", "app:Microsoft Word", "skill:storage.optimize"]))
     }
 
     @Test func parseAcceptsTheShapesSmallModelsWrite() throws {
@@ -565,7 +575,7 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         let toOnly = turn("send email", reply: "I'll send it.", steps: [("action:mail_send", ["to=bob@example.com"])])
         let model = ScriptedModel([
             "ChatTurn": [toOnly, toOnly,
-                         turn("edit", reply: "Changing the subject.", steps: [("action:mail_send", ["subject=Lunch"])])],
+                         turn("edit", reply: "Changing the subject.", steps: [("action:mail_send", ["subject=Lunch", "body=Old text from before"])])],
             "Compact": [compactAnswer],
         ])
         let (chat, _) = try chatEngine(model)
@@ -599,6 +609,31 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         a = try #require(run.report()?.findings.first { $0.id == state.pending }?.recommendations.first)
         #expect(a.call.params == ["to": "bob@example.com", "from": "me@example.com", "body": "Lunch at noon?", "subject": "Lunch"])
         #expect(a.problems == nil)
+    }
+
+    @Test func inventedLinksAreFlagged() {
+        let said = "envoie un email à michel_roberge@msn.com pour aller voir https://github.com/michelroberge/bibi-fm"
+        let p = Recipes.unknownLinks([PlannedStep(tool: "action:mail_send", args: ["to=michel_roberge@msn.com", "body=aller voir https://github.com/michelroberg/bibi-fm"]),
+                                      PlannedStep(tool: "action:mail_send", args: ["body=aller voir https://github.com/michelroberge/bibi-fm."]),
+                                      PlannedStep(tool: "action:message_send", args: ["text=écris à paul@example.com"]),
+                                      PlannedStep(tool: "action:reminder_add", args: ["title=https://x.example"])], said: said)
+        #expect(p[0] == ["body": "https://github.com/michelroberg/bibi-fm wasn't in the conversation; check it"])
+        #expect(p[1].isEmpty && p[3].isEmpty)
+        #expect(p[2]["text"]?.hasPrefix("paul@example.com") == true)
+    }
+
+    @Test func handTypedFieldsStayUnlessNamed() {
+        #expect(ChatEngine.names("subject", "Subject", in: "mets plutôt le sujet: Le repo"))
+        #expect(!ChatEngine.names("body", "Message", in: "mets plutôt le sujet: Le repo"))
+        #expect(ChatEngine.names("body", "Message", in: "change the message to something shorter"))
+        #expect(!ChatEngine.names("to", "To", in: "change the subject to Lunch"))
+    }
+
+    @Test func theCardIsShownToTheModelUnescaped() {
+        var a = BoundAction(ActionCall("mail_send", ["to": "me@x.co", "body": "voir https://github.com/a/b"]), title: "t", kind: "outbound",
+                            target: "", safety: 3, confidence: 7, reason: "", command: "")
+        a.problems = ["subject": "needed"]
+        #expect(ChatEngine.formText(a) == "Step: action:mail_send [\"body=voir https://github.com/a/b\",\"to=me@x.co\"]\nMissing: subject: needed")
     }
 
     @Test func choicesComeFromTheApps() async throws {
@@ -722,10 +757,12 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         #expect(mail.ids.contains("action:mail_send"))
         #expect(!mail.ids.contains("action:calendar_add"))
 
-        let tasks = chat.toolCatalog([], request: "flag my tasks about taxes", examples: [])
+        let tasks = chat.toolCatalog([], request: "flag my Tasky tasks about taxes", examples: [])
         #expect(tasks.ids.contains("app:Tasky"))
         #expect(tasks.text.contains("- app:Tasky [\"list=task\""))
         #expect(tasks.text.contains("Settable: name, due date, flagged"))
         #expect(!tasks.text.contains("sync password"))
+        // Without the app's name, a built-in action that fits (reminders for "tasks") keeps discovered apps out.
+        #expect(!chat.toolCatalog([], request: "flag my tasks about taxes", examples: []).ids.contains("app:Tasky"))
     }
 }

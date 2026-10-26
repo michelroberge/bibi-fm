@@ -11,9 +11,9 @@ public enum Recipes {
 
     /// How chat offers each one: its parameters and the words that make it relevant.
     public static let hints: [String: (hint: String, words: String)] = [
-        "mail_send": ("to=name or address (comma-separated), subject=..., body=..., cc=..., from=one of your addresses (optional)",
+        "mail_send": ("to=name or address (comma-separated), subject=..., body=the message, written from the request, cc=... (optional), from=the address to send from, only when the user says",
                       "email mail send write reply message courriel envoie envoyer écris écrire répondre"),
-        "mail_accounts": ("no args", "email mail account accounts address addresses from compte comptes adresse courriel"),
+        "mail_accounts": ("no args", "account accounts compte comptes"),
         "contacts_find": ("name=...", "contact contacts phone number address email who numéro téléphone adresse"),
         "calendar_list": ("from=the day the user said, to=... (optional), calendar=... only when the user names one",
                           "calendar agenda schedule meeting meetings event events busy free today tomorrow week calendrier réunion rendez libre occupé semaine"),
@@ -110,6 +110,27 @@ public enum Recipes {
             }
         }
         return (out, problems)
+    }
+
+    /// The free-text fields of messages that leave the Mac.
+    static let outboundText: [String: [String]] = ["action:mail_send": ["subject", "body"], "action:message_send": ["text"]]
+
+    /// Links and addresses in an outgoing message's text that the conversation never had: a small model invents
+    /// them or gets one character wrong. Reported under the field (one entry per step), the text is kept.
+    public static func unknownLinks(_ steps: [PlannedStep], said: String) -> [[String: String]] {
+        steps.map { s in
+            guard let keys = outboundText[s.tool] else { return [:] }
+            var out: [String: String] = [:]
+            for a in s.args {
+                let parts = a.split(separator: "=", maxSplits: 1).map(String.init)
+                guard parts.count == 2, keys.contains(parts[0].lowercased()) else { continue }
+                let links = Re.all(#"https?://[^\s<>"')]+|[^\s@<>(),;]+@[^\s@<>(),;]+\.[A-Za-z]{2,}"#, parts[1]).compactMap(\.first)
+                    .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?")) }
+                let unknown = links.filter { !mentioned($0, in: said) }
+                if !unknown.isEmpty { out[parts[0].lowercased()] = "\(unknown.joined(separator: ", ")) wasn't in the conversation; check it" }
+            }
+            return out
+        }
     }
 
     static func lookup(_ name: String, phone: Bool, contacts: any ContactStore) async -> Result<String, ActionError> {
