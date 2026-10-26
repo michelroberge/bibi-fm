@@ -1,0 +1,74 @@
+# Every pull request and every push to main runs `make ci`: a strict build (any warning in bibi's code fails it),
+# the tests, a release build and an install that is then run. main's ruleset requires the "ci" check to pass
+# before a pull request can merge.
+#
+# A tag v<version> (matching VERSION) also publishes a GitHub release with the built binary.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    # bibi needs the macOS 26 SDK (FoundationModels) and Swift 6.2.
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .build/repositories
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+
+      - name: Build, test, install
+        run: make ci
+
+  release:
+    name: release
+    needs: ci
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches VERSION
+        run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+
+      - name: Build
+        run: make release
+
+      - name: Package
+        run: |
+          mkdir -p dist/bibi
+          cp .build/release/bibi dist/bibi/
+          cp -R .build/release/bibi_BibiWeb.bundle dist/bibi/
+          cp README.md LICENSE dist/bibi/
+          tar -C dist -czf "bibi-$GITHUB_REF_NAME-macos-arm64.tar.gz" bibi
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "bibi-$GITHUB_REF_NAME-macos-arm64.tar.gz" --generate-notes --verify-tag

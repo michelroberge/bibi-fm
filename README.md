@@ -24,7 +24,7 @@ make install          # release build into ~/.local/libexec/bibi, symlinked as ~
 bibi list
 ```
 
-For development, `./bin/bibi` builds if needed and runs from the repo. Run the tests with `make test` (`swift run bibi-tests`). The version lives in `VERSION` and `Sources/BibiCore/Version.swift` (a test checks that they match); change both with `make bump V=x.y.z`.
+For development, `./bin/bibi` builds if needed and runs from the repo. Run the tests with `make test` (`swift run bibi-tests`). `make ci` runs everything a merge to `main` needs: a strict build where any warning in bibi's code is an error, the tests, a release build and an install into a scratch folder that is then run. GitHub Actions runs it on every pull request (`.github/workflows/ci.yml`), and `main` only accepts pull requests whose `ci` check passed. Pushing a tag `v<version>` matching `VERSION` publishes a release with the built binary. The version lives in `VERSION` and `Sources/BibiCore/Version.swift` (a test checks that they match); change both with `make bump V=x.y.z`.
 
 ## Commands
 
@@ -151,7 +151,8 @@ Built in (fixed scripts and Apple frameworks, so they behave the same every time
 | `message_send` | Messages (iMessage) | outbound | — |
 
 - **Only people you named.** Every recipient must appear in the conversation: a name or address the model made up is refused.
-- **Missing pieces are filled in or asked for.** If a step is refused (no text for the email, a name that matches two people), the model gets the reasons and fixes what your request already answers, such as writing the email from "tell him to look at the repo". If only you know the answer, bibi asks one question and keeps the unfinished step, so your reply completes it.
+- **Cards you fill in.** Email, message, call, event and reminder steps are cards with their fields (to, from, subject, message; title, start, calendar…). Fill in or change any field on the card; pick from live choices (the addresses Mail sends from, your calendars, your reminder lists); or say it in chat ("mets plutôt le sujet: …"), which changes only that field on the same card. A field you typed yourself stays yours unless you ask to change it. Problems show under their field (nothing to say yet, a name that matches two people, a link that never came up in the conversation), and Approve only becomes available once there are none. While a card is open, the model sees the card instead of the messages that led to it.
+- **The model fixes what it can first.** If a step is refused, or a card has gaps your request already answers (writing the email from "tell him to look at the repo"), the model gets one more try with the reasons. Anything only you know stays on the card for you.
 - **Names become exact addresses before you approve.** "Marie" is looked up in Contacts. The card shows `Marie Dupont <marie@example.com>`, or bibi says the name matches several people (or a person has several addresses) and asks which one.
 - **Dates become exact times when proposed.** "tomorrow 3pm" is shown as `2026-10-27 15:00`, so the card says exactly what will be created.
 - **Outbound steps show everything.** The card and the confirmation dialog show the recipients and the full text, and say it can't be taken back.

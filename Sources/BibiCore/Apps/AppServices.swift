@@ -18,6 +18,32 @@ public struct AppServices: Sendable {
     }
 
     public static let system = AppServices()
+
+    /// The live options of a choice field: the addresses Mail can send from, your calendars, your reminder lists.
+    public func choices(_ source: String) async throws -> [Choice] {
+        switch source {
+        case "mail_accounts":
+            // MailAccounts prints "Google: a@gmail.com, b@gmail.com" per account; one choice per address.
+            var seen = Set<String>()
+            return try await scripts.run(MailAccounts.script, args: [], timeout: 60).split(separator: "\n").flatMap { line -> [Choice] in
+                let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                guard parts.count == 2, !parts[1].hasSuffix("(disabled)") else { return [] }
+                return parts[1].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { Recipes.isEmail($0) && seen.insert($0.lowercased()).inserted }
+                    .map { Choice(value: $0, label: parts[0] == $0 ? $0 : "\($0) (\(parts[0]))") }
+            }
+        case "calendars", "reminder_lists":
+            return Array(Set(try await calendar.calendarNames(reminders: source == "reminder_lists"))).sorted().map { Choice(value: $0, label: $0) }
+        default:
+            throw ActionError("unknown choices '\(source)'")
+        }
+    }
+}
+
+public struct Choice: Codable, Sendable, Equatable {
+    public var value: String
+    public var label: String
+    public init(value: String, label: String) { self.value = value; self.label = label }
 }
 
 // MARK: AppleScript
@@ -172,6 +198,8 @@ public protocol CalendarStore: Sendable {
     func addReminder(title: String, due: Date?, dueHasTime: Bool, list: String?, notes: String?) async throws -> CalendarItem
     func setCompleted(id: String, _ done: Bool) async throws -> CalendarItem
     func removeReminder(id: String) async throws
+    /// The calendars events can go in, or the reminder lists.
+    func calendarNames(reminders: Bool) async throws -> [String]
 }
 
 /// EventKit, with a fresh store per call (EKEventStore isn't Sendable). macOS asks once for each kind of access.
@@ -283,6 +311,11 @@ public struct EventKitStore: CalendarStore {
         r.isCompleted = done
         try s.save(r, commit: true)
         return Self.item(r)
+    }
+
+    public func calendarNames(reminders: Bool) async throws -> [String] {
+        let s = try await store(reminders ? .reminder : .event)
+        return s.calendars(for: reminders ? .reminder : .event).filter(\.allowsContentModifications).map(\.title)
     }
 
     public func removeReminder(id: String) async throws {

@@ -25,7 +25,7 @@ extension RunMeta {
 
 public struct JournalEntry: Codable, Sendable {
     public enum Event: String, Codable, Sendable {
-        case selected, previewed, dryRun = "dry-run", executed, failed, undone, undoFailed = "undo-failed"
+        case selected, previewed, edited, dryRun = "dry-run", executed, failed, undone, undoFailed = "undo-failed"
     }
     public var time: Date
     public var event: Event

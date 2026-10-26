@@ -25,6 +25,8 @@ struct ActionInfo: Encodable {
     var privilege: Privilege
     var reversible: Bool
     var summary: String
+    /// Form fields the card shows (chat proposals); empty for actions approved as they are.
+    var fields: [ActionField] = []
 }
 
 struct HistoryItem: Encodable {
@@ -73,6 +75,11 @@ struct DecideBody: Decodable {
     var reason: String?
     var confirmAdmin: Bool?
     var dryRun: Bool?
+}
+
+struct EditBody: Decodable {
+    var action: String
+    var params: [String: String]
 }
 
 struct GuidanceBody: Decodable {
@@ -257,7 +264,7 @@ struct API: Sendable {
             var info: [String: ActionInfo] = [:]
             for a in report?.actions ?? [] {
                 if let s = harness.registry.spec(a.call.spec) {
-                    info[a.id] = ActionInfo(privilege: s.privilege, reversible: s.reversible || a.reversible, summary: s.summary)
+                    info[a.id] = ActionInfo(privilege: s.privilege, reversible: s.reversible || a.reversible, summary: s.summary, fields: s.fields)
                 }
             }
             let state = chat.state(run)
@@ -269,6 +276,26 @@ struct API: Sendable {
                                  candidates: state.candidates.compactMap { id in
                                      chat.graph.node(id).map { SkillLibrary.view($0, graph: chat.graph) }
                                  }))
+        }
+        // A field changed on a proposal's card: checked again and saved; the page reloads the chat to show it.
+        api.post("chat/:id/edit") { req, ctx in
+            let chat = try engine()
+            let run = try chatRun(ctx)
+            let b = try await decode(req, EditBody.self)
+            guard manager.hub(run.id).busy == nil else { throw HTTPError(.conflict, message: "bibi is still working on this chat") }
+            do {
+                return json(try chat.edit(run, action: b.action, changes: b.params))
+            } catch let e as ActionError {
+                throw HTTPError(.badRequest, message: e.description)
+            }
+        }
+        // The options of a choice field: Mail's sending addresses, calendars, reminder lists.
+        api.get("choices/:source") { _, ctx in
+            do {
+                return json(try await harness.apps.choices(ctx.parameters.get("source") ?? ""))
+            } catch {
+                throw HTTPError(.badRequest, message: "\(error)")
+            }
         }
         api.get("chat/:id/events") { req, ctx in
             let run = try chatRun(ctx)

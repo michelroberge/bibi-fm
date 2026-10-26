@@ -53,6 +53,7 @@ final class FakeCalendar: CalendarStore, @unchecked Sendable {
         }
     }
     func removeReminder(id: String) async throws { lock.withLock { removed.append(id); reminderItems.removeAll { $0.id == id } } }
+    func calendarNames(reminders: Bool) async throws -> [String] { reminders ? ["Reminders", "Groceries"] : ["Home", "Work"] }
 }
 
 /// Matches a whole name or any one word of it, like Contacts' whole-name matching.
@@ -292,6 +293,16 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
                                       PlannedStep(tool: "action:reminder_add", args: ["title=a"]),
                                       PlannedStep(tool: "action:reminder_add", args: ["title=b"])])
         #expect(merged.map(\.args) == [["title=a", "due=2036-01-01"], ["title=b"]])
+        // Agreeing on what they share, two halves of one email are one step; placeholders are no value.
+        let mail = Planner.prepare([PlannedStep(tool: "action:mail_send", args: ["to=a@b.co", "subject=Hi", "cc=..."]),
+                                    PlannedStep(tool: "action:mail_send", args: ["to=a@b.co", "body=Hello", "from=…"])])
+        #expect(mail.map(\.args) == [["to=a@b.co", "subject=Hi", "body=Hello"]])
+        // An action written as a command is the action.
+        let planner = Planner(registry: ActionRegistry(Builtins.all), env: env(testApps(tmp)), skill: { _ in nil })
+        let a = try? planner.bind(PlannedStep(tool: "command", args: ["mail_send", "to=a@b.co", "body=Hi"])).get()
+        #expect(a?.first?.call.spec == "mail_send")
+        // Skills and discovered apps don't make a message a new topic.
+        #expect(ChatEngine.continues("Step: action:mail_send []", tools: ["command", "app:Microsoft Word", "skill:storage.optimize"]))
     }
 
     @Test func parseAcceptsTheShapesSmallModelsWrite() throws {
@@ -409,16 +420,19 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         ]
         let said = "email Marie and x@y.com, call marie, and write to Paul, Paul Roy and Zed"
         let r = await Recipes.resolveRecipients(steps, contacts: contacts, said: said)
+        // Every step stays; a recipient that can't be used is taken out, with the reason under its field.
         #expect(r.steps.map(\.args) == [["to=Marie Dupont <marie@example.com>, x@y.com", "subject=Hi"],
-                                        ["to=Marie Dupont <+1 514 555 0199>"], ["echo", "Marie"]])
-        #expect(r.refusals.count == 6)
-        #expect(r.refusals[0].contains("matches 2 contacts"))
-        #expect(r.refusals[1].contains("has several addresses"))
-        #expect(r.refusals[2].contains("isn't in Contacts"))
+                                        ["to=Marie Dupont <+1 514 555 0199>"], ["to=", "subject=Hi"], ["to=", "text=hi"],
+                                        ["to=", "subject=Hi"], ["to=", "subject=Hi"], ["to=", "text=hi"],
+                                        ["echo", "Marie"]])
+        #expect(r.problems[0].isEmpty && r.problems[1].isEmpty && r.problems[7].isEmpty)
+        #expect(r.problems[2]["to"]?.contains("matches 2 contacts") == true)
+        #expect(r.problems[3]["to"]?.contains("has several addresses") == true)
+        #expect(r.problems[4]["to"]?.contains("isn't in Contacts") == true)
         // Addresses the model wrote must have been said too.
-        #expect(r.refusals[3] == "marie@example.com wasn't mentioned in this conversation; who should get it?")
-        #expect(r.refusals[4].hasPrefix("ghost@example.com wasn't mentioned"))
-        #expect(r.refusals[5].hasPrefix("+1 514 555 0000 wasn't mentioned"))
+        #expect(r.problems[5]["to"] == "marie@example.com wasn't mentioned in this conversation; who should get it? "
+                + "ghost@example.com wasn't mentioned in this conversation; who should get it?")
+        #expect(r.problems[6]["to"]?.hasPrefix("+1 514 555 0000 wasn't mentioned") == true)
         #expect(Recipes.mentioned("5145550199", in: "my number is +1 (514) 555-0199"))
         #expect(Recipes.mentioned("andré", in: "write to Andre"))
     }
@@ -444,9 +458,8 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         #expect(cal.queried?.1 == day.addingTimeInterval(86400))
         // A day without a time is an all-day event.
         // Dates in the past are the model's invention.
-        if case .success = planner.bind(PlannedStep(tool: "action:calendar_add", args: ["title=Old", "start=2024-04-05 09:00"])) {
-            Issue.record("a past event was proposed")
-        }
+        let old = try planner.bind(PlannedStep(tool: "action:calendar_add", args: ["title=Old", "start=2024-04-05 09:00"])).get()[0]
+        #expect(old.problems?["start"]?.contains("is in the past") == true)
         let allDay = try planner.bind(PlannedStep(tool: "action:calendar_add", args: ["Holiday", "start=2036-12-25"])).get()
         #expect(allDay[0].call.params["title"] == "Holiday")
         #expect(allDay[0].command.contains("all day"))
@@ -548,8 +561,8 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         let events = Events()
         await chat.send(run, "envois un email à \(address) en lui disant d'aller regarder https://github.com/michelroberge/bibi-fm", emit: events.emit)
         #expect(model.count("ChatTurn") == 2)
-        #expect(model.last("ChatTurn").contains("Problem: Marie wasn't mentioned in this conversation"))
-        #expect(model.last("ChatTurn").contains("Problem: mail_send: the email has no text yet"))
+        #expect(model.last("ChatTurn").contains("Problem: mail_send: to: Marie wasn't mentioned in this conversation"))
+        #expect(model.last("ChatTurn").contains("Problem: mail_send: body: needed"))
         let state = chat.state(run)
         let action = try #require(run.report()?.findings.first { $0.id == state.pending }?.recommendations.first)
         #expect(action.call.params["to"] == address)
@@ -558,27 +571,80 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         #expect(!chat.transcript(run).contains { $0.role == "note" })
     }
 
-    @Test func whatOnlyTheUserKnowsBecomesAQuestion() async throws {
-        let empty = turn("send email", reply: "I'll send it.", steps: [("action:mail_send", ["to=bob@example.com"])])
+    @Test func aDraftCollectsWhatIsMissing() async throws {
+        let toOnly = turn("send email", reply: "I'll send it.", steps: [("action:mail_send", ["to=bob@example.com"])])
         let model = ScriptedModel([
-            "ChatTurn": [empty, empty, empty,
-                         turn("send email", reply: "I'll send it.", steps: [("action:mail_send", ["to=bob@example.com", "subject=Lunch", "body=Lunch at noon?"])])],
+            "ChatTurn": [toOnly, toOnly,
+                         turn("edit", reply: "Changing the subject.", steps: [("action:mail_send", ["subject=Lunch", "body=Old text from before"])])],
             "Compact": [compactAnswer],
         ])
         let (chat, _) = try chatEngine(model)
         let run = try chat.start()
         await chat.send(run, "email bob@example.com", emit: Events().emit)
-        #expect(model.count("ChatTurn") == 3)  // the request and two repairs
-        let asked = try #require(chat.transcript(run).last)
-        #expect(asked.role == "bibi" && asked.text.hasPrefix("I need a bit more before I can do this"))
-        #expect(chat.state(run).draft?.contains("Step: action:mail_send") == true)
+        #expect(model.count("ChatTurn") == 2)  // the request and one repair
+        #expect(chat.transcript(run).last?.text == "Fill in what's missing below, or tell me, then approve.")
+        var state = chat.state(run)
+        var a = try #require(run.report()?.findings.first { $0.id == state.pending }?.recommendations.first)
+        #expect(a.problems == ["body": "needed"])
+        #expect(a.call.params == ["to": "bob@example.com"])
 
-        await chat.send(run, "ask him about lunch at noon", emit: Events().emit)
-        #expect(model.last("ChatTurn").contains("Unfinished request"))
-        #expect(model.last("ChatTurn").contains("Problem: mail_send: the email has no text yet"))
-        let state = chat.state(run)
-        #expect(state.pending != nil)
-        #expect(state.draft == nil)
+        // It can't be approved yet.
+        await #expect(throws: ActionError.self) { try await chat.decide(run, ChatDecision(approve: [a.id]), admin: RecordingAdminRunner()) { _, _ in } }
+
+        // Filled in by hand on the card.
+        a = try chat.edit(run, action: a.id, changes: ["body": "Lunch at noon?", "from": "me@example.com"])
+        #expect(a.problems == nil)
+        #expect(a.command.contains("body: Lunch at noon?"))
+        #expect(run.journalEntries.last?.event == .edited)
+        #expect(throws: ActionError.self) { try chat.edit(run, action: a.id, changes: ["bogus": "x"]) }
+
+        // Changed by asking: the same action again changes only what it gives, and the model saw the card instead
+        // of the messages that led to it.
+        await chat.send(run, "change the subject to Lunch", emit: Events().emit)
+        let prompt = model.last("ChatTurn")
+        #expect(prompt.contains("Proposal the user is filling in"))
+        #expect(prompt.contains("Step: action:mail_send [\"body=Lunch at noon?\",\"from=me@example.com\",\"to=bob@example.com\"]"))
+        #expect(!prompt.contains("User: email bob@example.com"))
+        state = chat.state(run)
+        a = try #require(run.report()?.findings.first { $0.id == state.pending }?.recommendations.first)
+        #expect(a.call.params == ["to": "bob@example.com", "from": "me@example.com", "body": "Lunch at noon?", "subject": "Lunch"])
+        #expect(a.problems == nil)
+    }
+
+    @Test func inventedLinksAreFlagged() {
+        let said = "envoie un email à michel_roberge@msn.com pour aller voir https://github.com/michelroberge/bibi-fm"
+        let p = Recipes.unknownLinks([PlannedStep(tool: "action:mail_send", args: ["to=michel_roberge@msn.com", "body=aller voir https://github.com/michelroberg/bibi-fm"]),
+                                      PlannedStep(tool: "action:mail_send", args: ["body=aller voir https://github.com/michelroberge/bibi-fm."]),
+                                      PlannedStep(tool: "action:message_send", args: ["text=écris à paul@example.com"]),
+                                      PlannedStep(tool: "action:reminder_add", args: ["title=https://x.example"])], said: said)
+        #expect(p[0] == ["body": "https://github.com/michelroberg/bibi-fm wasn't in the conversation; check it"])
+        #expect(p[1].isEmpty && p[3].isEmpty)
+        #expect(p[2]["text"]?.hasPrefix("paul@example.com") == true)
+    }
+
+    @Test func handTypedFieldsStayUnlessNamed() {
+        #expect(ChatEngine.names("subject", "Subject", in: "mets plutôt le sujet: Le repo"))
+        #expect(!ChatEngine.names("body", "Message", in: "mets plutôt le sujet: Le repo"))
+        #expect(ChatEngine.names("body", "Message", in: "change the message to something shorter"))
+        #expect(!ChatEngine.names("to", "To", in: "change the subject to Lunch"))
+    }
+
+    @Test func theCardIsShownToTheModelUnescaped() {
+        var a = BoundAction(ActionCall("mail_send", ["to": "me@x.co", "body": "voir https://github.com/a/b"]), title: "t", kind: "outbound",
+                            target: "", safety: 3, confidence: 7, reason: "", command: "")
+        a.problems = ["subject": "needed"]
+        #expect(ChatEngine.formText(a) == "Step: action:mail_send [\"body=voir https://github.com/a/b\",\"to=me@x.co\"]\nMissing: subject: needed")
+    }
+
+    @Test func choicesComeFromTheApps() async throws {
+        let scripts = FakeScripts(["Google: me@gmail.com\nExchange: me@msn.com, alias@msn.com\nOld: old@x.com (disabled)\nGoogle: me@gmail.com"])
+        let apps = testApps(tmp, scripts: scripts)
+        #expect(try await apps.choices("mail_accounts") == [Choice(value: "me@gmail.com", label: "me@gmail.com (Google)"),
+                                                            Choice(value: "me@msn.com", label: "me@msn.com (Exchange)"),
+                                                            Choice(value: "alias@msn.com", label: "alias@msn.com (Exchange)")])
+        #expect(try await apps.choices("reminder_lists").map(\.value) == ["Groceries", "Reminders"])
+        await #expect(throws: ActionError.self) { try await apps.choices("nope") }
+        #expect(MailSend().fields.first { $0.key == "from" }?.source == "mail_accounts")
     }
 
     @Test func theStepsFromTheFailedRunNowWork() async throws {
@@ -609,16 +675,16 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
     @Test func aNewTopicLeavesTheUnfinishedRequestBehind() async throws {
         let bad = turn("send", reply: "I'll do it.", steps: [("action:mail_send", ["to=me@example.com"])])
         let reminder = turn("remind", reply: "I'll add the reminder.", steps: [("action:reminder_add", ["reminder", "title=tester les emails", "due=aujourd'hui 19h"])])
-        let model = ScriptedModel(["ChatTurn": [bad, bad, bad, reminder], "Compact": [compactAnswer]])
+        let model = ScriptedModel(["ChatTurn": [bad, bad, reminder], "Compact": [compactAnswer]])
         let (chat, _) = try chatEngine(model)
         let run = try chat.start()
         await chat.send(run, "email me@example.com", emit: Events().emit)
-        #expect(chat.state(run).draft != nil)
+        #expect(chat.state(run).pending != nil)  // an email card waiting for its text
 
         await chat.send(run, "rappelles-moi de tester les emails à 19h", emit: Events().emit)
         let prompt = model.last("ChatTurn")
         #expect(prompt.contains("action:reminder_add"))
-        #expect(!prompt.contains("Unfinished request"))
+        #expect(!prompt.contains("Proposal the user is filling in"))
         let state = chat.state(run)
         let action = try #require(run.report()?.findings.first { $0.id == state.pending }?.recommendations.first)
         #expect(action.call.spec == "reminder_add")
@@ -668,15 +734,15 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
 
     @Test func aQuestionFromTheModelIsKept() async throws {
         let model = ScriptedModel([
-            "ChatTurn": [turn("call", reply: "", steps: [("action:facetime_call", ["to=Paul"])]),
-                         turn("call", reply: "Quel Paul veux-tu appeler ?")],
+            "ChatTurn": [turn("find", reply: "", steps: [("action:contacts_find", [])]),
+                         turn("find", reply: "Qui veux-tu chercher ?")],
             "Compact": [compactAnswer],
         ])
         let (chat, _) = try chatEngine(model)
         let run = try chat.start()
-        await chat.send(run, "appelle Paul", emit: Events().emit)
-        #expect(chat.transcript(run).last?.text == "Quel Paul veux-tu appeler ?")
-        #expect(chat.state(run).draft?.contains("Paul isn't in Contacts") == true)
+        await chat.send(run, "cherche un contact", emit: Events().emit)
+        #expect(chat.transcript(run).last?.text == "Qui veux-tu chercher ?")
+        #expect(chat.state(run).draft?.contains("missing parameter name") == true)
     }
 
     @Test func chatOffersBuiltInsAndDiscoveredApps() throws {
@@ -691,10 +757,12 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         #expect(mail.ids.contains("action:mail_send"))
         #expect(!mail.ids.contains("action:calendar_add"))
 
-        let tasks = chat.toolCatalog([], request: "flag my tasks about taxes", examples: [])
+        let tasks = chat.toolCatalog([], request: "flag my Tasky tasks about taxes", examples: [])
         #expect(tasks.ids.contains("app:Tasky"))
         #expect(tasks.text.contains("- app:Tasky [\"list=task\""))
         #expect(tasks.text.contains("Settable: name, due date, flagged"))
         #expect(!tasks.text.contains("sync password"))
+        // Without the app's name, a built-in action that fits (reminders for "tasks") keeps discovered apps out.
+        #expect(!chat.toolCatalog([], request: "flag my tasks about taxes", examples: []).ids.contains("app:Tasky"))
     }
 }

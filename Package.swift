@@ -11,6 +11,9 @@ let testingFlags: (swift: [SwiftSetting], linker: [LinkerSetting]) =
                       "-Xlinker", "-rpath", "-Xlinker", "/Library/Developer/CommandLineTools/Library/Developer/usr/lib"])])
     : ([], [])
 
+// BIBI_STRICT=1 (CI, make ci): any warning in bibi's own targets fails the build. Dependencies are not affected.
+let strict: [SwiftSetting] = ProcessInfo.processInfo.environment["BIBI_STRICT"] == "1" ? [.treatAllWarnings(as: .error)] : []
+
 let package = Package(
     name: "bibi",
     platforms: [.macOS(.v26)],
@@ -22,8 +25,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
     ],
     targets: [
-        .target(name: "BibiCore"),
-        .target(name: "BibiSkills", dependencies: ["BibiCore"]),
+        .target(name: "BibiCore", swiftSettings: strict),
+        .target(name: "BibiSkills", dependencies: ["BibiCore"], swiftSettings: strict),
         .target(
             name: "BibiWeb",
             dependencies: [
@@ -32,7 +35,8 @@ let package = Package(
                 .product(name: "HTTPTypes", package: "swift-http-types"),
                 .product(name: "Logging", package: "swift-log"),
             ],
-            resources: [.copy("Static")]
+            resources: [.copy("Static")],
+            swiftSettings: strict
         ),
         // The embedded Info.plist carries the usage descriptions macOS needs before it asks for Calendars,
         // Reminders and Contacts access (a command-line tool has no bundle to hold them).
@@ -40,6 +44,7 @@ let package = Package(
             name: "bibi",
             dependencies: ["BibiCore", "BibiSkills", "BibiWeb"],
             exclude: ["Info.plist"],
+            swiftSettings: strict,
             linkerSettings: [.unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist",
                                            "-Xlinker", Context.packageDirectory + "/Sources/bibi/Info.plist"])]
         ),
@@ -50,7 +55,7 @@ let package = Package(
             dependencies: ["BibiCore", "BibiSkills", "BibiWeb", .product(name: "HummingbirdTesting", package: "hummingbird")],
             path: "Tests/BibiTests",
             resources: [.copy("Fixtures")],
-            swiftSettings: testingFlags.swift + [.unsafeFlags(["-enable-testing"])],
+            swiftSettings: testingFlags.swift + [.unsafeFlags(["-enable-testing"])] + strict,
             linkerSettings: testingFlags.linker
         ),
     ]

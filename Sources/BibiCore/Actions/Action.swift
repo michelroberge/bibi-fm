@@ -32,6 +32,27 @@ public struct Preview: Codable, Sendable {
     public var error: String?
 }
 
+/// One parameter of an action as a form field. Chat shows the fields on the proposal card, so the user can fill in
+/// or change any of them before approving (by hand, by asking in chat, or by picking from live choices).
+public struct ActionField: Codable, Sendable, Equatable {
+    public var key: String
+    public var label: String
+    /// text, longtext, addresses, datetime, choice or bool.
+    public var kind: String
+    public var required: Bool
+    /// Where a choice field's options come from (`AppServices.choices`): mail_accounts, calendars, reminder_lists.
+    public var source: String?
+    /// Fixed options for a choice field.
+    public var options: [String]?
+    public var placeholder: String?
+
+    public init(_ key: String, _ label: String, kind: String = "text", required: Bool = false, source: String? = nil,
+                options: [String]? = nil, placeholder: String? = nil) {
+        self.key = key; self.label = label; self.kind = kind; self.required = required; self.source = source
+        self.options = options; self.placeholder = placeholder
+    }
+}
+
 /// A recommendation the user can approve: a registry call plus everything needed to judge it.
 public struct BoundAction: Codable, Sendable, Identifiable {
     public var id: String  // "a3", assigned when attached to a finding
@@ -48,6 +69,10 @@ public struct BoundAction: Codable, Sendable, Identifiable {
     public var weight: Double  // < 1 for actions that don't directly reclaim anything (e.g. review)
     public var privilege: Privilege
     public var reversible: Bool
+    /// What still needs filling in or fixing, by field key ("" = not about one field). nil: ready to approve.
+    public var problems: [String: String]?
+    /// Fields the user typed on the card: a later chat turn doesn't overwrite them unless the user asks.
+    public var edited: [String]?
 
     public init(_ call: ActionCall, title: String, kind: String, target: String, bytes: Int = 0, safety: Int,
                 confidence: Int, reason: String, command: String, weight: Double = 1, privilege: Privilege = .user,
@@ -99,6 +124,8 @@ public protocol ActionSpec: Sendable {
     /// Brings parameters the model wrote into the form validate accepts (dates in words → exact dates). Runs once,
     /// when the step is proposed, so the card shows exactly what will run.
     func normalize(_ p: Params, _ env: ActionEnv) -> Params
+    /// The parameters as form fields; empty for actions that are approved as they are.
+    var fields: [ActionField] { get }
     func validate(_ p: Params, _ env: ActionEnv) throws
     /// Human-readable steps. Must not change anything.
     func plan(_ p: Params, _ env: ActionEnv) throws -> [String]
@@ -111,6 +138,29 @@ extension ActionSpec {
     public var privilege: Privilege { .user }
     public var kind: String? { nil }
     public func normalize(_ p: Params, _ env: ActionEnv) -> Params { p }
+    public var fields: [ActionField] { [] }
+
+    /// What is missing or wrong, by field: required fields left empty, then validation's complaint, filed under
+    /// the field it names ("to: x is not an email address") or under "".
+    public func problems(_ p: Params, _ env: ActionEnv) -> [String: String] {
+        var out: [String: String] = [:]
+        for f in fields where f.required && (p[f.key] ?? "").trimmingCharacters(in: .whitespaces).isEmpty { out[f.key] = "needed" }
+        guard out.isEmpty else { return out }
+        do { try validate(p, env) } catch {
+            var m = "\(error)"
+            if m.hasPrefix(id + ": ") { m = String(m.dropFirst(id.count + 2)) }
+            let field = fields.first { m.hasPrefix($0.key + ":") || m.hasSuffix("parameter " + $0.key) }
+            if let f = field, m.hasPrefix(f.key + ":") { m = String(m.dropFirst(f.key.count + 1)).trimmingCharacters(in: .whitespaces) }
+            out[field?.key ?? ""] = m
+        }
+        return out
+    }
+
+    /// The parameters as the card shows them while some are missing (a preview needs them all).
+    public func describe(_ p: Params) -> String {
+        let shown = fields.compactMap { f in p[f.key].flatMap { $0.isEmpty ? nil : "\(f.label.lowercased()): \($0)" } }
+        return ([summary] + shown).joined(separator: "; ")
+    }
 
     public func require(_ p: Params, _ key: String) throws -> String {
         guard let v = p[key], !v.isEmpty else { throw ActionError("\(id): missing parameter \(key)") }

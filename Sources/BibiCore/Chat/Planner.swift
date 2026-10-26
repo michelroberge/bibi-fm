@@ -100,6 +100,8 @@ public struct Planner: Sendable {
             let words = Set(name.split(separator: "_").map(String.init) + [name, "action", "app"])
             if args.contains(where: { $0.contains("=") }) { args.removeAll { !$0.contains("=") && words.contains($0.lowercased()) } }
             args.removeAll { $0.hasSuffix("=") && $0.filter({ $0 == "=" }).count == 1 }
+            // Placeholders copied from a hint or an example ("body=...") are no value at all.
+            args.removeAll { a in a.split(separator: "=", maxSplits: 1).last.map { ["...", "…", "<...>", "<value>"].contains($0.trimmingCharacters(in: .whitespaces)) } ?? false }
         }
         s.args = args
         return s
@@ -108,9 +110,10 @@ public struct Planner: Sendable {
     /// One action split over several steps (the recipient in one, the text in the next) becomes one step again,
     /// when the steps don't set the same parameter twice.
     static func merge(_ steps: [PlannedStep]) -> [PlannedStep] {
-        func keys(_ s: PlannedStep) -> Set<String>? {
-            let ks = s.args.map { $0.split(separator: "=", maxSplits: 1).first.map(String.init) ?? "" }
-            return s.args.allSatisfy { $0.contains("=") } ? Set(ks) : nil
+        func values(_ s: PlannedStep) -> [String: String]? {
+            guard s.args.allSatisfy({ $0.contains("=") }) else { return nil }
+            return Dictionary(s.args.map { a in let p = a.split(separator: "=", maxSplits: 1).map(String.init); return (p[0], p.count > 1 ? p[1] : "") },
+                              uniquingKeysWith: { _, b in b })
         }
         var out: [PlannedStep] = []
         for s in steps {
@@ -120,9 +123,10 @@ public struct Planner: Sendable {
                 if b.isSubset(of: a) { continue }
                 if a.isSubset(of: b) { out[i] = s; continue }
             }
+            // Steps that agree on every parameter they share (both say to=, one adds the body) are one step.
             if s.tool.hasPrefix("action:"), let i = out.lastIndex(where: { $0.tool == s.tool }),
-               let a = keys(out[i]), let b = keys(s), a.isDisjoint(with: b) {
-                out[i].args += s.args
+               let a = values(out[i]), let b = values(s), a.allSatisfy({ k, v in b[k].map { $0 == v } ?? true }) {
+                out[i].args += s.args.filter { !Set(out[i].args).contains($0) }
                 if out[i].purpose.isEmpty { out[i].purpose = s.purpose }
             } else {
                 out.append(s)
@@ -133,6 +137,11 @@ public struct Planner: Sendable {
 
     public func bind(_ s: PlannedStep) -> Swift.Result<[BoundAction], ActionError> {
         let s = Self.tidy(s)
+        // ["mail_send", "to=..."] as a command: the model meant the action (no program has an action's name).
+        if s.tool == "command", let first = s.args.first, first.contains("_"), let spec = registry.spec(first), spec.selectable,
+           !["run_command", "run_command_admin", "run_skill", "run_app_call"].contains(first) {
+            return bind(PlannedStep(tool: "action:" + first, args: Array(s.args.dropFirst()), purpose: s.purpose))
+        }
         let purpose = Text.oneLine(s.purpose, max: 120)
         if s.tool == "command" {
             let v = CommandPolicy.classify(s.args, policy: env.policy)
@@ -197,9 +206,20 @@ public struct Planner: Sendable {
                 params[key] = key == "path" ? Paths.standardize(CommandPolicy.expand(value, home: env.policy.home)) : value
             }
             let call = ActionCall(id, spec.normalize(params, env))
+            let safety = spec.kind == "read-only" ? 10 : spec.kind == "outbound" ? 3 : spec.reversible ? 8 : 6
+            // An action with form fields that isn't complete yet is a draft: the user fills in the rest on the card.
+            if !spec.fields.isEmpty {
+                let problems = spec.problems(call.params, env)
+                if !problems.isEmpty {
+                    var a = BoundAction(call, title: purpose.ifEmpty(spec.summary), kind: spec.kind ?? id, target: "", safety: safety,
+                                        confidence: 7, reason: spec.summary, command: spec.describe(call.params),
+                                        privilege: spec.privilege, reversible: spec.reversible)
+                    a.problems = problems
+                    return .success([a])
+                }
+            }
             let steps = registry.preview(call, env)
             if let e = steps.error { return .failure(ActionError(e)) }
-            let safety = spec.kind == "read-only" ? 10 : spec.kind == "outbound" ? 3 : spec.reversible ? 8 : 6
             return collect([(call, BoundAction(call, title: purpose.ifEmpty(spec.summary), kind: spec.kind ?? id,
                                                target: call.params.values.sorted().joined(separator: " "),
                                                safety: safety, confidence: 7, reason: spec.summary,

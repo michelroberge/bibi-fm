@@ -164,43 +164,69 @@ public final class ChatEngine: Sendable {
         }
         state.turns += 1
         state.results = []
+        // The new message supersedes the open proposal, but a card being filled in carries over into this turn.
+        let previous = state.pending
         state.pending = nil
         say(run, &state, ChatMessage("user", question), emit)
-        await think(run, &state, question: question, emit: emit)
+        await think(run, &state, question: question, previous: previous, emit: emit)
         await compact(run, &state)
         save(run, state)
     }
 
     /// One model turn. `question` is nil for the follow-up that answers from results.
-    func think(_ run: RunRecord, _ state: inout ChatState, question: String?, emit: @escaping ChatEmit) async {
+    func think(_ run: RunRecord, _ state: inout ChatState, question: String?, previous: String? = nil, emit: @escaping ChatEmit) async {
         let focus = question ?? state.recent.last(where: { $0.role == "user" })?.text ?? ""
         let v = embedder.vector(focus)
         harness.apps.catalog.refresh(graph: graph)
         let skills = rankSkills(focus, v)
         let shown = question == nil ? [] : exampleIntents(focus)
-        let tools = toolCatalog(skills, request: focus, examples: shown, vector: v)
+        var tools = toolCatalog(skills, request: focus, examples: shown, vector: v)
 
         // An unfinished request from the last turn: the user's message may be the missing piece, unless it asks for
         // something else (then the old request would only drag the model back to it).
         let draft = question == nil ? nil : state.draft.flatMap { Self.continues($0, tools: tools.ids) ? $0 : nil }
         if question != nil { state.draft = nil }
+        // The open proposal's form actions: the model sees their fields, and proposing the same action again changes
+        // only the fields it gives ("make the subject shorter"). A message about something else leaves them alone.
+        let open = question == nil ? [] : openForms(run, previous)
+        let form = open.map(Self.formText).joined(separator: "\n")
+        // Only the tools the message's own words select: an example's tools ("bibi" recalls a reminder) aren't a topic.
+        let worded = toolCatalog(skills, request: focus, examples: [], vector: v).ids
+        let editing = open.isEmpty || !Self.continues(form, tools: worded) ? [] : open
+        if !editing.isEmpty {
+            // The card's own actions are always available while it is being filled in ("mets le sujet…" names no tool).
+            var t = toolCatalog(skills, request: focus, examples: [], vector: v)
+            for a in editing where !t.ids.contains("action:" + a.call.spec) {
+                t.ids.append("action:" + a.call.spec)
+                if let spec = harness.registry.spec(a.call.spec) {
+                    t.text += "\n- action:\(spec.id) \(Self.actionHints[spec.id]?.hint ?? ""): \(spec.summary)"
+                }
+            }
+            tools = t
+        }
 
         var ctx = ContextBuilder()
         // The model doesn't know the date; without it, "tomorrow" becomes a date from its training.
         ctx.add("Now", DateText.formatter("EEEE yyyy-MM-dd HH:mm").string(from: Date()), priority: 0)
         ctx.add("Tools", tools.text, priority: 0, maxChars: 2500)
-        ctx.add("Conversation so far", state.summary, priority: 3, maxChars: 1200)
+        ctx.add("Conversation so far", editing.isEmpty ? state.summary : "", priority: 3, maxChars: 1200)
         let known = facts(focus, v)
         ctx.add("Known facts", known, priority: 4, maxChars: 600)
-        if question != nil {
+        // While a card is being filled in, past requests would only lend it their content.
+        if question != nil && editing.isEmpty {
             ctx.add("Examples of requests and the steps that answered them", examples(shown), priority: 1, maxChars: 700)
         }
         let recent = recentText(state, dropLastUser: question != nil)
-        ctx.add("Recent messages", recent, priority: 2, maxChars: 2000)
+        // While the user fills in a card, the card holds what was settled: the messages that led to it would only
+        // repeat it less precisely (and use the small context). Grounding below still checks the whole conversation.
+        ctx.add("Recent messages", editing.isEmpty ? recent : recentText(state, dropLastUser: true, since: previous), priority: 2,
+                maxChars: 2000)
         ctx.add("Results of the steps the user approved", state.results.joined(separator: "\n\n"), priority: 0, maxChars: 2500)
         ctx.add("Commands that check the latest findings", (state.hints ?? []).joined(separator: "\n"), priority: 1, maxChars: 900)
         ctx.add("Unfinished request (the user's message may answer it; then propose the completed steps)", draft ?? "", priority: 0,
                 maxChars: 1200)
+        ctx.add("Proposal the user is filling in (to change it, propose the same action with only the fields to change)",
+                editing.isEmpty ? "" : form, priority: 0, maxChars: 1500)
         ctx.add(question == nil ? "Task" : "User",
                 question ?? "Answer the user's last request from these results: quote or summarize the output lines that answer it, with the numbers that matter. If they don't answer it, say what is missing.",
                 priority: 0)
@@ -227,23 +253,36 @@ public final class ChatEngine: Sendable {
         }
 
         // People and addresses must come from the conversation (or Contacts), never from the model's imagination.
-        let said = [question ?? "", recent, state.summary, known, draft ?? "", state.results.joined(separator: "\n")].joined(separator: "\n")
-        var plan = Planner.Result(), tried = steps
+        // Values in the open form were said by the user (typed there) or already checked.
+        let said = [question ?? "", recent, state.summary, known, draft ?? "", form, state.results.joined(separator: "\n")].joined(separator: "\n")
+        var plan = Planner.Result(), tried = steps, best: (plan: Planner.Result, steps: [PlannedStep])?
         for attempt in 0...Self.repairs where !steps.isEmpty {
             tried = steps
-            plan = await bind(steps, run: run, said: said, request: question ?? focus)
-            guard !plan.refusals.isEmpty, plan.actions.isEmpty, attempt < Self.repairs else { break }
+            plan = await bind(steps, run: run, said: said, request: question ?? focus, editing: editing)
+            if best.map({ Self.score(plan) > Self.score($0.plan) }) ?? true { best = (plan, steps) }
+            let drafts = plan.actions.filter { $0.problems != nil }
+            // Nothing runnable: up to two repairs. A draft with gaps: one, in case the request already fills them.
+            guard plan.actions.isEmpty && !plan.refusals.isEmpty || !drafts.isEmpty,
+                  attempt < (plan.actions.isEmpty ? Self.repairs : 1) else { break }
             // Let the model fix what the request already answers; what only the user knows becomes a question.
             emit("delta", "Filling in what's missing…")
             var fix = ctx
-            fix.add("Problems with the steps you proposed", Self.problems(steps, plan.refusals), priority: 0, maxChars: 1500)
+            let gaps = drafts.flatMap { a in (a.problems ?? [:]).sorted { $0.key < $1.key }.map { "\(a.call.spec): \($0.key.isEmpty ? "" : $0.key + ": ")\($0.value)" } }
+            fix.add("Problems with the steps you proposed", Self.problems(steps, plan.refusals + gaps), priority: 0, maxChars: 1500)
             guard let again = await ask(run, &state, fix, instructions: instructions, schema: schema, emit: emit) else { return }
             answer = again
             steps = Self.steps(answer)
             reply = (answer["reply"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        if let best, Self.score(best.plan) > Self.score(plan) { (plan, tried) = best }
 
         var finding: String?
+        // Nothing new came of a turn about the card being filled in: it stays open.
+        if plan.actions.isEmpty, !editing.isEmpty {
+            state.pending = previous
+            // The model may claim it did something; nothing changed.
+            if !reply.hasSuffix("?") { reply = "The card below didn't change: edit it there, or tell me what to change." }
+        }
         if !plan.actions.isEmpty {
             finding = addProposal(run, title: phrase, explanation: reply, actions: plan.actions)
             state.pending = finding
@@ -271,7 +310,9 @@ public final class ChatEngine: Sendable {
                 say(run, &state, ChatMessage("note", "bibi left out some of the proposed steps:\n" + why), emit)
             }
         }
-        if finding != nil && (Self.claimsResults(reply, question: focus) || !Self.readsAsPlan(reply)) {
+        if plan.actions.contains(where: { $0.problems != nil }) {
+            reply = "Fill in what's missing below, or tell me, then approve."
+        } else if finding != nil && (Self.claimsResults(reply, question: focus) || !Self.readsAsPlan(reply)) {
             // The model sometimes answers as if the steps had already run; nothing has run yet.
             reply = "Here is what I'd do; approve it to run."
         }
@@ -279,19 +320,77 @@ public final class ChatEngine: Sendable {
         say(run, &state, ChatMessage("bibi", reply, finding: finding), emit)
     }
 
-    /// True if a message whose words selected `tools` can be the answer to `draft`: it brings in no app or skill
-    /// the draft didn't use. "rappelle-moi de tester les emails" after an unfinished email also selects mail (it
-    /// says "emails"), but reminders too: a new request.
+    /// True if a message whose words selected `tools` can be the answer to `draft`: it brings in no built-in app
+    /// action the draft didn't use. "rappelle-moi de tester les emails" after an unfinished email also selects mail
+    /// (it says "emails"), but reminders too: a new request. Skills and discovered apps match too loosely to count.
     static func continues(_ draft: String, tools: [String]) -> Bool {
         // Actions of one app count as one family (mail_send and mail_accounts both belong to Mail).
         func family(_ tool: String) -> String { tool.hasPrefix("action:") ? Recipes.apps[String(tool.dropFirst(7))] ?? tool : tool }
-        let wanted = Set(tools.filter { $0.hasPrefix("action:") || $0.hasPrefix("app:") || $0.hasPrefix("skill:") }.map(family))
+        let wanted = Set(tools.filter { $0.hasPrefix("action:") && Recipes.apps[String($0.dropFirst(7))] != nil }.map(family))
         let tried = Set(Re.all(#"(?m)^Step: (\S+)"#, draft).compactMap { $0.count > 1 ? family($0[1]) : nil })
         return wanted.subtracting(tried).isEmpty
     }
 
     /// How many times the model may fix refused steps before bibi asks the user.
     static let repairs = 2
+
+    /// How good a bound plan is: runnable actions first, then fewer gaps and refusals.
+    static func score(_ p: Planner.Result) -> Int {
+        let ready = p.actions.filter { $0.problems == nil }.count
+        let gaps = p.actions.reduce(0) { $0 + ($1.problems?.count ?? 0) }
+        return ready * 100 + p.actions.count * 10 - gaps - p.refusals.count
+    }
+
+    /// Words that name a field in a message ("mets plutôt le sujet…", "change the message"), besides its label.
+    static let fieldWords: [String: [String]] = [
+        "body": ["body", "message", "texte", "text", "corps", "contenu", "content"],
+        "subject": ["subject", "sujet", "objet", "titre"],
+        "to": ["destinataire", "destinataires", "recipient", "recipients"],
+        "from": ["from", "expéditeur", "sender", "compte", "account", "depuis"],
+        "cc": ["cc", "copie"],
+        "title": ["title", "titre", "nom", "name"],
+        "start": ["start", "début", "heure", "time", "date", "quand", "when"],
+        "end": ["end", "fin", "durée", "until", "jusqu'à"],
+        "due": ["due", "échéance", "heure", "time", "date", "quand", "when"],
+        "location": ["location", "lieu", "où", "where"],
+        "notes": ["notes", "note"],
+        "text": ["text", "texte", "message"],
+        "calendar": ["calendar", "calendrier"],
+        "list": ["list", "liste"],
+    ]
+
+    /// True if `message` talks about the field (by one of its words or its label).
+    static func names(_ key: String, _ label: String?, in message: String) -> Bool {
+        let m = message.lowercased()
+        // Short labels ("To", "Cc") are everyday words; their field words above cover them.
+        let words = (fieldWords[key] ?? []) + (label.flatMap { $0.count > 3 ? [$0.lowercased()] : nil } ?? [])
+        return words.contains { Re.test("(?<![\\p{L}])" + NSRegularExpression.escapedPattern(for: $0) + "(?![\\p{L}])", m) }
+    }
+
+    /// The not-yet-run actions with form fields in the proposal waiting for decisions.
+    func openForms(_ run: RunRecord, _ finding: String?) -> [BoundAction] {
+        guard let finding else { return [] }
+        let done = Set(run.journalEntries.filter { $0.event == .executed }.compactMap(\.actionID))
+        return (run.report()?.findings.first { $0.id == finding }?.recommendations ?? []).filter {
+            !done.contains($0.id) && harness.registry.spec($0.call.spec)?.fields.isEmpty == false
+        }
+    }
+
+    static let plainEncoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.outputFormatting = [.withoutEscapingSlashes]
+        return e
+    }()
+
+    /// An open form as the model sees it: the step it would propose, and what is still missing.
+    static func formText(_ a: BoundAction) -> String {
+        let args = a.call.params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+        // Unescaped ("https://", not "https:\/\/"): the grounding checks read this text too.
+        let list = (try? Self.plainEncoder.encode(args)).flatMap { String(data: $0, encoding: .utf8) } ?? JSON.string(args)
+        return (["Step: action:\(a.call.spec) \(list)"]
+                + (a.problems ?? [:]).sorted { $0.key < $1.key }.map { "Missing: \($0.key.isEmpty ? "" : $0.key + ": ")\($0.value)" })
+            .joined(separator: "\n")
+    }
 
     /// One model call, shortening the prompt when it overflows the context. Says what went wrong and returns nil
     /// when it can't answer.
@@ -324,17 +423,38 @@ public final class ChatEngine: Sendable {
 
     /// Checks proposed steps: names become addresses, then bibi's rules bind them. Steps already proposed in this
     /// chat (run or skipped) aren't offered again.
-    func bind(_ steps: [PlannedStep], run: RunRecord, said: String, request: String) async -> Planner.Result {
+    func bind(_ steps: [PlannedStep], run: RunRecord, said: String, request: String, editing: [BoundAction] = []) async -> Planner.Result {
         let planner = Planner(registry: harness.registry, env: harness.env(admin: NoAdminRunner(), reporter: SilentReporter()),
                               skill: { [harness] in harness.skill(named: $0) })
-        let prepared = Recipes.groundNames(Recipes.groundDates(Planner.prepare(steps), request: request), said: said)
+        // A step for an action the user is filling in starts from the form's values; the step's own values win,
+        // except over a field the user typed by hand, unless their message talks about that field.
+        var handTyped: [String: [String]] = [:]  // action spec → fields the user typed that stay theirs
+        let merged = Planner.prepare(steps).map { s -> PlannedStep in
+            guard let a = editing.first(where: { "action:" + $0.call.spec == s.tool }) else { return s }
+            var s = s
+            let fields = harness.registry.spec(a.call.spec)?.fields ?? []
+            let kept = (a.edited ?? []).filter { key in !Self.names(key, fields.first { $0.key == key }?.label, in: request) }
+            handTyped[a.call.spec] = kept
+            s.args = a.call.params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+                + s.args.filter { arg in !kept.contains(arg.split(separator: "=", maxSplits: 1).first.map(String.init)?.lowercased() ?? "") }
+            return s
+        }
+        let prepared = Recipes.groundNames(Recipes.groundDates(merged, request: request), said: said)
         let people = await Recipes.resolveRecipients(prepared, contacts: harness.apps.contacts, said: said)
-        var plan = planner.bind(people.steps)
-        plan.refusals = people.refusals + plan.refusals
-        // A step dropped for its recipient may have other problems too: report them now, so one repair fixes all.
-        for s in people.dropped {
-            if case .failure(let e) = planner.bind(s), !e.description.contains("is not an email address"),
-               !e.description.contains("is not a phone number") { plan.refusals.append(e.description) }
+        let links = Recipes.unknownLinks(people.steps, said: said)
+        var plan = Planner.Result()
+        for (s, gaps) in zip(people.steps, zip(people.problems, links).map { $0.merging($1) { a, _ in a } }) {
+            switch planner.bind(s) {
+            case .success(let actions):
+                // A recipient taken out of a step says why under its field.
+                plan.actions += actions.map { a in
+                    var a = a
+                    if let kept = handTyped[a.call.spec], !kept.isEmpty { a.edited = kept }
+                    if !gaps.isEmpty { a.problems = (a.problems ?? [:]).merging(gaps) { _, why in why } }
+                    return a
+                }
+            case .failure(let e): plan.refusals.append(e.description)
+            }
         }
         let earlier = Set((run.report()?.actions ?? []).map { JSON.string($0.call) })
         plan.actions.removeAll { earlier.contains(JSON.string($0.call)) }
@@ -448,10 +568,12 @@ public final class ChatEngine: Sendable {
             ids.append("action:" + id)
             lines.append("- action:\(id) \(a.hint): \(spec.summary)")
         }
-        // Discovered app capabilities, except for apps a listed built-in action already covers.
+        // Discovered app capabilities, when no built-in app action fits or the message names the app: a small model
+        // picks whatever is listed, and "email" also matches Safari's "email contents".
         let covered = Set(ids.compactMap { $0.hasPrefix("action:") ? Recipes.apps[String($0.dropFirst(7))] : nil })
         for n in rankCapabilities(request, vector, examples: used) {
             guard let bundle = n.props["app"]?.string, !covered.contains(bundle), let app = harness.apps.catalog.app(bundle),
+                  covered.isEmpty || Recipes.mentioned(app.name, in: request),
                   let hint = AppScripts.hint(app, op: n.props["op"]?.string ?? "", term: n.props["term"]?.string ?? "") else { continue }
             if !ids.contains("app:" + app.name) { ids.append("app:" + app.name) }
             lines.append(hint)
@@ -492,9 +614,19 @@ public final class ChatEngine: Sendable {
         return out
     }
 
+    /// Free text of an earlier message (its body, its title): left out of examples, so the model takes the shape
+    /// of the step and writes the content from this request.
+    static let contentKeys: Set<String> = ["body", "subject", "text", "title", "notes", "location"]
+
     func examples(_ intents: [GraphNode]) -> String {
         intents.map { n in
-            let steps = SkillMiner.steps(n).map { "\($0.tool) " + JSON.string($0.args) }.joined(separator: "; ")
+            let steps = SkillMiner.steps(n).map { st in
+                let args = st.args.filter { a in
+                    guard st.tool.hasPrefix("action:"), let eq = a.firstIndex(of: "=") else { return true }
+                    return !Self.contentKeys.contains(String(a[..<eq]))
+                }
+                return "\(st.tool) " + JSON.string(args)
+            }.joined(separator: "; ")
             return "\"\(Text.oneLine(n.text, max: 100))\" → \(steps)"
         }.joined(separator: "\n")
     }
@@ -508,8 +640,10 @@ public final class ChatEngine: Sendable {
             .map { "- \($0.0.text) (\(ago($0.0.updated)))" }.joined(separator: "\n")
     }
 
-    func recentText(_ state: ChatState, dropLastUser: Bool) -> String {
+    /// The last few messages for the prompt; with `since`, only those after the message carrying that proposal.
+    func recentText(_ state: ChatState, dropLastUser: Bool, since finding: String? = nil) -> String {
         var msgs = state.recent
+        if let finding, let i = msgs.lastIndex(where: { $0.finding == finding }) { msgs = Array(msgs[(i + 1)...]) }
         if dropLastUser, msgs.last?.role == "user" { msgs.removeLast() }
         return msgs.map { m in
             let who = ["user": "User", "bibi": "bibi", "result": "Result", "note": "Note"][m.role] ?? m.role
@@ -547,6 +681,10 @@ public final class ChatEngine: Sendable {
             guard let a = report.action(id) else { throw ActionError("unknown action \(id)") }
             guard !done.contains(id) else { throw ActionError("\(a.title) already ran") }
             return a
+        }
+        if let a = approved.first(where: { $0.problems != nil }) {
+            let fields = (a.problems ?? [:]).keys.filter { !$0.isEmpty }.sorted()
+            throw ActionError("\(a.title): fill in \(fields.isEmpty ? "what's missing" : fields.joined(separator: ", ")) first")
         }
         let skipped = d.skip.compactMap(report.action)
         let owner = state.skill ?? GraphSync.root
@@ -605,6 +743,38 @@ public final class ChatEngine: Sendable {
         await compact(run, &state)
         save(run, state)
         return results
+    }
+
+    /// Changes fields of a proposed action from the form on its card, checks them again and saves the proposal.
+    /// What the user types there is their own word, so it needs no grounding; empty clears a field.
+    @discardableResult
+    public func edit(_ run: RunRecord, action id: String, changes: [String: String]) throws -> BoundAction {
+        let state = state(run)
+        guard var report = run.report(), let fi = report.findings.firstIndex(where: { $0.id == state.pending }),
+              let ai = report.findings[fi].recommendations.firstIndex(where: { $0.id == id }) else {
+            throw ActionError("\(id) isn't part of the open proposal")
+        }
+        guard !run.journalEntries.contains(where: { $0.event == .executed && $0.actionID == id }) else { throw ActionError("that step already ran") }
+        var a = report.findings[fi].recommendations[ai]
+        guard let spec = harness.registry.spec(a.call.spec), !spec.fields.isEmpty else { throw ActionError("\(a.title) has no fields to change") }
+        let env = harness.env(admin: NoAdminRunner(), reporter: SilentReporter())
+        var params = a.call.params
+        for (k, v) in changes {
+            guard spec.fields.contains(where: { $0.key == k }) else { throw ActionError("\(spec.id) has no field \(k)") }
+            let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
+            params[k] = t.isEmpty ? nil : t
+        }
+        a.call.params = spec.normalize(params, env)
+        let problems = spec.problems(a.call.params, env)
+        a.problems = problems.isEmpty ? nil : problems
+        a.command = problems.isEmpty ? harness.registry.preview(a.call, env).steps.joined(separator: "; ") : spec.describe(a.call.params)
+        a.target = problems.isEmpty ? a.call.params.values.sorted().joined(separator: " ") : ""
+        a.edited = Array(Set(a.edited ?? []).union(changes.keys)).sorted()
+        report.findings[fi].recommendations[ai] = a
+        run.save(report)
+        run.journal(JournalEntry(.edited, actionID: a.id, title: a.title, call: a.call,
+                                 message: "changed " + changes.keys.sorted().joined(separator: ", "), frontend: "chat"))
+        return a
     }
 
     func record(_ kind: String, _ owner: String, _ state: ChatState, _ run: RunRecord) {
@@ -701,7 +871,13 @@ public final class ChatEngine: Sendable {
             state.summary = Text.clip(s, max: 1200)
             let source = lines + "\n" + state.summary
             for f in r["facts"]?.array ?? [] {
-                if let subject = f["subject"]?.string, let statement = f["statement"]?.string, Self.grounded(statement, in: source) {
+                // A "fact" that mostly repeats a message bibi answered with a proposal is that request, in any language.
+                let msgs = Array(old)
+                let asked = msgs.indices.filter { i in
+                    msgs[i].role == "user" && msgs[(i + 1)...].first(where: { $0.role == "bibi" })?.finding != nil
+                }.map { msgs[$0].text }
+                if let subject = f["subject"]?.string, let statement = f["statement"]?.string, Self.grounded(statement, in: source),
+                   !asked.contains(where: { Similarity.jaccard($0, statement) >= 0.6 }) {
                     remember(subject, statement, conversation: run.id)
                 }
             }

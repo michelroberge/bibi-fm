@@ -180,7 +180,7 @@ public enum DiskIO {
             guard rc == 0 else { continue }
             var name = [CChar](repeating: 0, count: 256)
             proc_name(pid, &name, UInt32(name.count))
-            out[pid] = (String(cString: name), info.ri_diskio_bytesread, info.ri_diskio_byteswritten)
+            out[pid] = (String(cBuffer: name), info.ri_diskio_bytesread, info.ri_diskio_byteswritten)
         }
         return out
     }
@@ -206,7 +206,7 @@ public struct QuitProcess: ActionSpec {
 
     static func name(of pid: Int32) -> String? {
         var buf = [CChar](repeating: 0, count: 256)
-        return proc_name(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : nil
+        return proc_name(pid, &buf, UInt32(buf.count)) > 0 ? String(cBuffer: buf) : nil
     }
 
     static func owner(of pid: Int32) -> uid_t? {

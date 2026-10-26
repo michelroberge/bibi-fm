@@ -280,7 +280,7 @@ public enum Probe {
                 defer { freeaddrinfo(res) }
                 var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                 if getnameinfo(r.pointee.ai_addr, r.pointee.ai_addrlen, &buf, socklen_t(buf.count), nil, 0, NI_NUMERICHOST) == 0 {
-                    return String(cString: buf)
+                    return String(cBuffer: buf)
                 }
             }
             return nil
@@ -299,7 +299,7 @@ public enum Probe {
                     getnameinfo($0, socklen_t(MemoryLayout<sockaddr_in>.size), &buf, socklen_t(buf.count), nil, 0, NI_NAMEREQD)
                 }
             }
-            return rc == 0 ? String(cString: buf) : nil
+            return rc == 0 ? String(cBuffer: buf) : nil
         }
         return await withTaskGroup(of: String??.self) { group in
             group.addTask { .some(await lookup.value) }

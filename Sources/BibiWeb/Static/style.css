@@ -48,7 +48,7 @@ h3 { font-size: 15px; margin: 0; }
 .spread { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 label.field { display: grid; gap: 4px; margin: 10px 0; }
 label.field span { font-weight: 500; font-size: 13px; }
-input[type=text], input[type=number], input[type=search], select { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); width: 100%; max-width: 420px; }
+input[type=text], input[type=number], input[type=search], input[type=datetime-local], select { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); width: 100%; max-width: 420px; }
 label.check { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
 button { font: inherit; border-radius: 8px; padding: 7px 14px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
 button:hover { border-color: var(--accent); }
@@ -167,3 +167,11 @@ main:has(.chatpage) { max-width: none; padding-left: 24px; padding-right: 24px; 
   .msg.user { max-width: 90%; width: auto; }
   nav { overflow-x: auto; margin: -10px 0; }
 }
+
+/* Draft cards: an action's fields, editable before approving. */
+.draft { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 4px; }
+.draft label.field { margin: 8px 0; }
+.draft textarea, .draft input[type=text], .draft select { max-width: 100%; }
+.draft label.field.bad input, .draft label.field.bad textarea, .draft label.field.bad select { border-color: var(--bad); }
+.draft .problem { color: var(--bad); font-size: 12px; }
+.seg button:disabled { opacity: .5; cursor: not-allowed; }
