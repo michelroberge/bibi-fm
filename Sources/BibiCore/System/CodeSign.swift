@@ -55,6 +55,6 @@ public enum CodeSign {
     /// Path of a running process's executable.
     public static func executable(pid: Int32) -> String? {
         var buf = [CChar](repeating: 0, count: 4 * 1024)
-        return proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : nil
+        return proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 ? String(cBuffer: buf) : nil
     }
 }

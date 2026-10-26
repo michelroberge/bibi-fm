@@ -53,6 +53,7 @@ final class FakeCalendar: CalendarStore, @unchecked Sendable {
         }
     }
     func removeReminder(id: String) async throws { lock.withLock { removed.append(id); reminderItems.removeAll { $0.id == id } } }
+    func calendarNames(reminders: Bool) async throws -> [String] { reminders ? ["Reminders", "Groceries"] : ["Home", "Work"] }
 }
 
 /// Matches a whole name or any one word of it, like Contacts' whole-name matching.
@@ -409,16 +410,19 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         ]
         let said = "email Marie and x@y.com, call marie, and write to Paul, Paul Roy and Zed"
         let r = await Recipes.resolveRecipients(steps, contacts: contacts, said: said)
+        // Every step stays; a recipient that can't be used is taken out, with the reason under its field.
         #expect(r.steps.map(\.args) == [["to=Marie Dupont <marie@example.com>, x@y.com", "subject=Hi"],
-                                        ["to=Marie Dupont <+1 514 555 0199>"], ["echo", "Marie"]])
-        #expect(r.refusals.count == 6)
-        #expect(r.refusals[0].contains("matches 2 contacts"))
-        #expect(r.refusals[1].contains("has several addresses"))
-        #expect(r.refusals[2].contains("isn't in Contacts"))
+                                        ["to=Marie Dupont <+1 514 555 0199>"], ["to=", "subject=Hi"], ["to=", "text=hi"],
+                                        ["to=", "subject=Hi"], ["to=", "subject=Hi"], ["to=", "text=hi"],
+                                        ["echo", "Marie"]])
+        #expect(r.problems[0].isEmpty && r.problems[1].isEmpty && r.problems[7].isEmpty)
+        #expect(r.problems[2]["to"]?.contains("matches 2 contacts") == true)
+        #expect(r.problems[3]["to"]?.contains("has several addresses") == true)
+        #expect(r.problems[4]["to"]?.contains("isn't in Contacts") == true)
         // Addresses the model wrote must have been said too.
-        #expect(r.refusals[3] == "marie@example.com wasn't mentioned in this conversation; who should get it?")
-        #expect(r.refusals[4].hasPrefix("ghost@example.com wasn't mentioned"))
-        #expect(r.refusals[5].hasPrefix("+1 514 555 0000 wasn't mentioned"))
+        #expect(r.problems[5]["to"] == "marie@example.com wasn't mentioned in this conversation; who should get it? "
+                + "ghost@example.com wasn't mentioned in this conversation; who should get it?")
+        #expect(r.problems[6]["to"]?.hasPrefix("+1 514 555 0000 wasn't mentioned") == true)
         #expect(Recipes.mentioned("5145550199", in: "my number is +1 (514) 555-0199"))
         #expect(Recipes.mentioned("andré", in: "write to Andre"))
     }

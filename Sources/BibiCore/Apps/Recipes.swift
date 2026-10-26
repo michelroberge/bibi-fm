@@ -77,18 +77,22 @@ public enum Recipes {
     }
 
     /// Replaces names in recipient parameters with the one address Contacts has for them, so the approval card
-    /// shows exactly who gets the message or call. A step whose recipient wasn't mentioned in `said`, or whose
-    /// name doesn't resolve to exactly one address, is dropped with the reason.
+    /// shows exactly who gets the message or call. A recipient that wasn't mentioned in `said`, or whose name
+    /// doesn't resolve to exactly one address, is taken out of the step, and the reason is filed under its field
+    /// (one entry of `problems` per step, by field key).
     public static func resolveRecipients(_ steps: [PlannedStep], contacts: any ContactStore, said: String) async
-        -> (steps: [PlannedStep], refusals: [String], dropped: [PlannedStep]) {
-        var out: [PlannedStep] = [], refusals: [String] = [], dropped: [PlannedStep] = []
+        -> (steps: [PlannedStep], problems: [[String: String]]) {
+        var out: [PlannedStep] = [], problems: [[String: String]] = []
         for var s in steps {
-            guard let spec = people[s.tool] else { out.append(s); continue }
+            var found: [String: String] = [:]
+            defer { out.append(s); problems.append(found) }
+            guard let spec = people[s.tool] else { continue }
             if s.args.count == 1, !s.args[0].contains("="), let main = mainParam[String(s.tool.dropFirst(7))] { s.args[0] = main + "=" + s.args[0] }
-            var why: [String] = []
             for (i, a) in s.args.enumerated() {
-                guard let eq = a.firstIndex(of: "="), spec.keys.contains(a[..<eq].trimmingCharacters(in: .whitespaces).lowercased()) else { continue }
-                var resolved: [String] = []
+                guard let eq = a.firstIndex(of: "=") else { continue }
+                let key = a[..<eq].trimmingCharacters(in: .whitespaces).lowercased()
+                guard spec.keys.contains(key) else { continue }
+                var resolved: [String] = [], why: [String] = []
                 for item in list(String(a[a.index(after: eq)...])) {
                     let v = address(item).value
                     guard mentioned(v, in: said) else {
@@ -102,10 +106,10 @@ public enum Recipes {
                     }
                 }
                 s.args[i] = String(a[...eq]) + resolved.joined(separator: ", ")
+                if !why.isEmpty { found[key] = why.joined(separator: " ") }
             }
-            if why.isEmpty { out.append(s) } else { refusals += why; dropped.append(s) }
         }
-        return (out, refusals, dropped)
+        return (out, problems)
     }
 
     static func lookup(_ name: String, phone: Bool, contacts: any ContactStore) async -> Result<String, ActionError> {
@@ -180,7 +184,7 @@ public enum Recipes {
 
     static func date(_ p: Params, _ key: String, _ id: String) throws -> (date: Date, hasTime: Bool)? {
         guard let v = p[key], !v.isEmpty else { return nil }
-        guard let d = DateText.strict(v) else { throw ActionError("\(id): \(key) must be a date like 2026-10-27 15:00, got \(v)") }
+        guard let d = DateText.strict(v) else { throw ActionError("\(id): \(key): must be a date like 2026-10-27 15:00, got \(v)") }
         return d
     }
 
@@ -189,7 +193,7 @@ public enum Recipes {
         guard let d = try date(p, key, id) else { return nil }
         let end = d.hasTime ? d.date : Calendar.current.date(byAdding: .day, value: 1, to: d.date)!
         guard end > now.addingTimeInterval(-12 * 3600) else {
-            throw ActionError("\(id): \(key) \(p[key]!) is in the past; write the date as the user said it, like \"tomorrow 9am\"")
+            throw ActionError("\(id): \(key): \(p[key]!) is in the past; write the date as the user said it, like \"tomorrow 9am\"")
         }
         return d
     }
@@ -208,6 +212,13 @@ public struct MailSend: ActionSpec {
     public let id = "mail_send"
     public let summary = "Send an email from one of your Mail accounts"
     public var kind: String? { "outbound" }
+    public var fields: [ActionField] {
+        [.init("to", "To", kind: "addresses", required: true, placeholder: "names or addresses, comma-separated"),
+         .init("from", "From", kind: "choice", source: "mail_accounts", placeholder: "Mail's default account"),
+         .init("cc", "Cc", kind: "addresses"),
+         .init("subject", "Subject"),
+         .init("body", "Message", kind: "longtext", required: true)]
+    }
     public init() {}
 
     struct Message {
@@ -225,11 +236,11 @@ public struct MailSend: ActionSpec {
         }
         // The text first: a step whose recipient is also wrong still says what else is missing.
         let subject = p["subject"] ?? "", body = p["body"] ?? ""
-        guard !subject.isEmpty || !body.isEmpty else { throw ActionError("mail_send: the email has no text yet (body= and subject=)") }
-        guard body.count <= 50_000 else { throw ActionError("mail_send: the body is too long") }
+        guard !subject.isEmpty || !body.isEmpty else { throw ActionError("body: the email has no text yet") }
+        guard body.count <= 50_000 else { throw ActionError("body: too long") }
         let m = Message(to: try parse("to"), cc: try parse("cc"), bcc: try parse("bcc"), subject: subject, body: body,
                         from: p["from"].flatMap { $0.isEmpty ? nil : Recipes.address($0).value })
-        guard !m.to.isEmpty else { throw ActionError("mail_send: missing parameter to") }
+        guard !m.to.isEmpty else { throw ActionError("to: needed") }
         if let f = m.from, !Recipes.isEmail(f) { throw ActionError("from: \(f) is not an email address") }
         return m
     }
@@ -376,6 +387,12 @@ public struct CalendarAdd: ActionSpec {
     public let id = "calendar_add"
     public let summary = "Add an event to your calendar"
     public var reversible: Bool { true }
+    public var fields: [ActionField] {
+        [.init("title", "Title", required: true), .init("start", "Starts", kind: "datetime", required: true),
+         .init("end", "Ends", kind: "datetime", placeholder: "an hour later"), .init("allday", "All day", kind: "bool"),
+         .init("calendar", "Calendar", kind: "choice", source: "calendars", placeholder: "your default calendar"),
+         .init("location", "Location"), .init("notes", "Notes", kind: "longtext")]
+    }
     public init() {}
 
     public func normalize(_ p: Params, _ env: ActionEnv) -> Params { Recipes.normalizeDates(p, ["start", "end"]) }
@@ -386,7 +403,7 @@ public struct CalendarAdd: ActionSpec {
         let allDay = p["allday"].map { ["true", "yes"].contains($0.lowercased()) } ?? !start.hasTime
         let end = try Recipes.date(p, "end", id)?.date
             ?? (allDay ? start.date : Calendar.current.date(byAdding: .hour, value: 1, to: start.date)!)
-        guard end >= start.date else { throw ActionError("calendar_add: the event ends before it starts") }
+        guard end >= start.date else { throw ActionError("end: the event ends before it starts") }
         let opt = { (k: String) in p[k].flatMap { $0.isEmpty ? nil : $0 } }
         return NewEvent(title: title, start: start.date, end: end, allDay: allDay, calendar: opt("calendar"),
                         location: opt("location"), notes: opt("notes"))
@@ -446,6 +463,11 @@ public struct ReminderAdd: ActionSpec {
     public let id = "reminder_add"
     public let summary = "Add a reminder"
     public var reversible: Bool { true }
+    public var fields: [ActionField] {
+        [.init("title", "Reminder", required: true), .init("due", "Due", kind: "datetime"),
+         .init("list", "List", kind: "choice", source: "reminder_lists", placeholder: "your default list"),
+         .init("notes", "Notes", kind: "longtext")]
+    }
     public init() {}
 
     public func normalize(_ p: Params, _ env: ActionEnv) -> Params { Recipes.normalizeDates(p, ["due"]) }
@@ -521,15 +543,19 @@ public struct FaceTimeCall: ActionSpec {
     public let id = "facetime_call"
     public let summary = "Call someone with FaceTime (audio or video) or through your iPhone"
     public var kind: String? { "outbound" }
+    public var fields: [ActionField] {
+        [.init("to", "Call", required: true, placeholder: "name, phone number or address"),
+         .init("via", "How", kind: "choice", options: ["audio", "video", "phone"], placeholder: "audio")]
+    }
     public init() {}
 
     func target(_ p: Params) throws -> (url: String, shown: String, via: String) {
         let a = Recipes.address(try require(p, "to"))
         let via = (p["via"] ?? "audio").lowercased()
-        guard ["audio", "video", "phone"].contains(via) else { throw ActionError("facetime_call: via must be audio, video or phone") }
+        guard ["audio", "video", "phone"].contains(via) else { throw ActionError("via: must be audio, video or phone") }
         let email = Recipes.isEmail(a.value)
-        guard email || Recipes.isPhone(a.value) else { throw ActionError("facetime_call: \(a.value) is not a phone number or address") }
-        if via == "phone" && email { throw ActionError("facetime_call: a phone call needs a phone number") }
+        guard email || Recipes.isPhone(a.value) else { throw ActionError("to: \(a.value) is not a phone number or address") }
+        if via == "phone" && email { throw ActionError("to: a phone call needs a phone number") }
         let handle = email ? a.value : String(a.value.filter { $0.isNumber || $0 == "+" })
         let scheme = ["audio": "facetime-audio://", "video": "facetime://", "phone": "tel:"][via]!
         return (scheme + handle, a.name.map { "\($0) (\(a.value))" } ?? a.value, via)
@@ -552,13 +578,16 @@ public struct MessageSend: ActionSpec {
     public let id = "message_send"
     public let summary = "Send an iMessage with Messages"
     public var kind: String? { "outbound" }
+    public var fields: [ActionField] {
+        [.init("to", "To", required: true, placeholder: "name, phone number or address"), .init("text", "Message", kind: "longtext", required: true)]
+    }
     public init() {}
 
     func message(_ p: Params) throws -> (to: (name: String?, value: String), text: String) {
         let text = try require(p, "text")
-        guard text.count <= 5000 else { throw ActionError("message_send: the message is too long") }
+        guard text.count <= 5000 else { throw ActionError("text: too long") }
         let a = Recipes.address(try require(p, "to"))
-        guard Recipes.isEmail(a.value) || Recipes.isPhone(a.value) else { throw ActionError("message_send: \(a.value) is not a phone number or address") }
+        guard Recipes.isEmail(a.value) || Recipes.isPhone(a.value) else { throw ActionError("to: \(a.value) is not a phone number or address") }
         return (a, text)
     }
 

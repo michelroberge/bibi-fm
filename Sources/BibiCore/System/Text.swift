@@ -108,3 +108,10 @@ public enum Text {
         Similarity.tokens(s).filter { !Similarity.stopwords.contains($0) }.prefix(maxWords).joined(separator: "-").ifEmpty("skill")
     }
 }
+
+extension String {
+    /// A C string from a fixed-size buffer a system call filled in, up to its first NUL.
+    public init(cBuffer: [CChar]) {
+        self = String(decoding: cBuffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+}

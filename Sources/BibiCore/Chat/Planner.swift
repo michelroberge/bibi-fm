@@ -197,9 +197,20 @@ public struct Planner: Sendable {
                 params[key] = key == "path" ? Paths.standardize(CommandPolicy.expand(value, home: env.policy.home)) : value
             }
             let call = ActionCall(id, spec.normalize(params, env))
+            let safety = spec.kind == "read-only" ? 10 : spec.kind == "outbound" ? 3 : spec.reversible ? 8 : 6
+            // An action with form fields that isn't complete yet is a draft: the user fills in the rest on the card.
+            if !spec.fields.isEmpty {
+                let problems = spec.problems(call.params, env)
+                if !problems.isEmpty {
+                    var a = BoundAction(call, title: purpose.ifEmpty(spec.summary), kind: spec.kind ?? id, target: "", safety: safety,
+                                        confidence: 7, reason: spec.summary, command: spec.describe(call.params),
+                                        privilege: spec.privilege, reversible: spec.reversible)
+                    a.problems = problems
+                    return .success([a])
+                }
+            }
             let steps = registry.preview(call, env)
             if let e = steps.error { return .failure(ActionError(e)) }
-            let safety = spec.kind == "read-only" ? 10 : spec.kind == "outbound" ? 3 : spec.reversible ? 8 : 6
             return collect([(call, BoundAction(call, title: purpose.ifEmpty(spec.summary), kind: spec.kind ?? id,
                                                target: call.params.values.sorted().joined(separator: " "),
                                                safety: safety, confidence: 7, reason: spec.summary,
