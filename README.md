@@ -41,6 +41,7 @@ Skills are grouped into namespaces: `bibi list` shows all of them, and `bibi sto
 | `history`, `undo`, `diff` | Lists saved runs, undoes actions, and compares runs over time |
 | `skills [candidates\|show\|accept\|dismiss\|disable\|enable <name>]` | The skill tree with statistics, and skills learned in chat |
 | `learned.<name> --<param> …` | A skill bibi learned in chat and you accepted |
+| `apps [scan\|show <app>\|permissions]` | The apps chat can use, and the macOS permissions they need |
 
 `[web]` = can contact internet services. `[admin]` = some of its actions need your password.
 
@@ -133,6 +134,35 @@ How commands from chat are checked:
 - **Only the latest proposal can be approved.** Sending a new message supersedes the open one.
 
 Each chat is saved as a run in History, with the full transcript, every model call, the journal of what ran, and undo. **Details** on a chat opens that run. The chat list can be searched (titles and every message). Deleting a chat removes its transcript and run, but what bibi learned from it (statistics, examples, facts) stays.
+
+### Apps: email, calendar, reminders, calls, messages and more
+
+Ask "email Marie that the repo is ready", "what's on my calendar tomorrow?", "remind me to call the bank at 4pm", "call Marie", "text Paul I'm on my way". bibi proposes the step and nothing happens until you approve it, as for everything else.
+
+Built in (fixed scripts and Apple frameworks, so they behave the same every time):
+
+| Action | Uses | Class | Undo |
+| --- | --- | --- | --- |
+| `mail_send`, `mail_accounts` | Mail.app, any account configured in it (`from=` picks one) | outbound / read-only | — |
+| `calendar_list`, `calendar_add` | EventKit (repeating events included) | read-only / writes | removes the event |
+| `reminders_list`, `reminder_add`, `reminder_complete` | EventKit | read-only / writes | removes or reopens it |
+| `contacts_find` | Contacts | read-only | — |
+| `facetime_call` | FaceTime audio or video, or a phone call through your iPhone (`via=`) | outbound | — |
+| `message_send` | Messages (iMessage) | outbound | — |
+
+- **Names become exact addresses before you approve.** "Marie" is looked up in Contacts. The card shows `Marie Dupont <marie@example.com>`, or bibi says the name matches several people (or a person has several addresses) and asks which one.
+- **Dates become exact times when proposed.** "tomorrow 3pm" is shown as `2026-10-27 15:00`, so the card says exactly what will be created.
+- **Outbound steps show everything.** The card and the confirmation dialog show the recipients and the full text, and say it can't be taken back.
+
+**Other apps are discovered.** bibi reads the scripting dictionary (`.sdef`) of every scriptable app in `/Applications`, `/System/Applications` and `~/Applications` (`bibi apps` lists them; `bibi apps show Notes` shows what one offers). It indexes each command and class in bibi.db, so chat finds them like skills: "add a note called groceries", "play my running playlist", "list my Keynote documents". For those:
+
+- The model fills in a structured call (`app:Notes ["make=note", "name=Groceries"]`). It never writes script text: bibi writes the AppleScript from the app's dictionary, checks each value's type, and passes values as arguments, never as script source.
+- bibi's rules give the call a class: read verbs (`get`, `count`, `exists`) are read-only; `make` and most commands write; `delete`, `quit`, `empty`… are destructive; `send`, `reply`, `forward`, `post`, `call`… are outbound.
+- Refused: commands that run code or drive the screen (`do shell script`, `do JavaScript`, `keystroke`…), apps that exist to run scripts (Terminal, Script Editor, System Events, Automator), and properties that look like credentials (Mail's account `password`). Raw `osascript … tell application …` from chat is refused too, and so are `mail`/`sendmail`, which can't deliver email on a Mac.
+- Something bibi created with `make` can be undone when the app gives it an id (Reminders, Notes…).
+- New Outlook ignores the scripting dictionary it still ships, so bibi leaves it out; add your accounts to Mail.app to send from them.
+
+**Permissions.** macOS asks once for each: Calendars, Reminders, Contacts, and Automation for each app bibi controls. Run `bibi apps permissions` to answer the dialogs up front. They're granted to the app bibi runs from (Terminal, iTerm, VS Code…) and can be changed in System Settings > Privacy & Security.
 
 ## How bibi learns skills
 
@@ -311,6 +341,7 @@ public struct Ping: Skill {
 Sources/BibiCore/     no UI
   Harness.swift       runs skills, previews/executes/undoes actions, saves history
   Actions/            ActionSpec registry, built-in actions, diagnostics, safety policy
+  Apps/               app catalog (.sdef discovery), AppleScript writer, mail/calendar/reminders/calls actions
   Chat/               ChatEngine (the generic skill), CommandPolicy, Planner, ContextBuilder
   Graph/              GraphStore (SQLite), PromptBook, GraphSync, Seeds, embeddings
   Learn/              SkillMiner, GraphSkill (learned skills), SkillLibrary
@@ -318,7 +349,7 @@ Sources/BibiCore/     no UI
   History/ Report/ Enrich/ System/
 Sources/BibiSkills/   storage, dev, sys, sec, net (and sw, parked)
 Sources/BibiWeb/      Hummingbird server, JSON API, SSE; Static/ (index.html, app.js, chat.js, style.css)
-Sources/bibi/         command-line front end
+Sources/bibi/         command-line front end; Info.plist (permission texts, embedded at link time)
 Tests/BibiTests/      swift-testing suites (make test)
 ```
 

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>local.bibi</string>
+	<key>CFBundleName</key>
+	<string>bibi</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>bibi lists and adds calendar events you approve in chat.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>bibi lists, adds and completes reminders you approve in chat.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>bibi looks up people you name in chat, to show their exact address before you approve an email, message or call.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>bibi controls Mail, Messages and other apps only for steps you approve in chat.</string>
+</dict>
+</plist>

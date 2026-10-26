@@ -6,7 +6,7 @@ public enum Builtins {
         TrashPath(), RestorePath(), ClearRegenerableDir(), EmptyTrash(), ToolCleanup(), Reveal(), OpenURL(),
         OpenSettingsPane(), RunDiagnostic(admin: false), RunDiagnostic(admin: true),
         RunCommand(admin: false), RunCommand(admin: true), RunSkillSpec(),
-    ]
+    ] + Recipes.all
 }
 
 func requireAbsolute(_ path: String, _ id: String) throws -> String {

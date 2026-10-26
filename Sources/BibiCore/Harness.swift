@@ -31,12 +31,14 @@ public final class Harness: Sendable {
     public let policy: SafetyPolicy
     /// bibi.db: skill tree, prompts, statistics and learned skills. nil = none (tests, or if it can't be opened).
     public let graph: GraphStore?
+    /// Mail, Calendar, Reminders, Contacts, FaceTime and the catalog of scriptable apps.
+    public let apps: AppServices
     let makeModel: @Sendable () -> any LanguageModel
     /// Skills learned in chat and accepted by the user; reloaded when one is accepted or disabled.
     private let learned = Mutex<[String: any Skill]>([:])
 
     public init(skills: [any Skill], store: RunStore = RunStore(), policy: SafetyPolicy = SafetyPolicy(),
-                graph: GraphStore? = nil, model: @escaping @Sendable () -> any LanguageModel) {
+                graph: GraphStore? = nil, apps: AppServices = .system, model: @escaping @Sendable () -> any LanguageModel) {
         var d: [String: any Skill] = [:]
         for s in skills { d[s.name] = s }
         self.skills = d
@@ -44,6 +46,7 @@ public final class Harness: Sendable {
         self.store = store
         self.policy = policy
         self.graph = graph
+        self.apps = apps
         self.makeModel = model
         if let graph {
             GraphSync.syncBuiltins(graph, skills: skills, registry: registry)
@@ -100,7 +103,7 @@ public final class Harness: Sendable {
     }
 
     public func env(admin: any AdminRunner, reporter: any Reporter) -> ActionEnv {
-        ActionEnv(policy: policy, admin: admin, reporter: reporter)
+        ActionEnv(policy: policy, admin: admin, reporter: reporter, apps: apps)
     }
 
     public func preview(_ actions: [BoundAction], env: ActionEnv, run: RunRecord? = nil) -> [Preview] {

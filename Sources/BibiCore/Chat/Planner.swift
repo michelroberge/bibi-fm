@@ -27,6 +27,10 @@ public struct PlannedStep: Codable, Sendable, Equatable {
         case "run_skill":
             return PlannedStep(tool: "skill:" + (a.call.params["skill"] ?? ""),
                                args: CommandPolicy.decode(a.call.params["argv"] ?? "[]") ?? [], purpose: a.title)
+        case "run_app_call":
+            let c = (try? JSON.decode(AppCall.self, from: a.call.params["call"] ?? "")) ?? AppCall(op: "command", term: "")
+            let args = ["\(c.op)=\(c.term)"] + c.values.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
+            return PlannedStep(tool: "app:" + a.target, args: args, purpose: a.title)
         default:
             return PlannedStep(tool: "action:" + a.call.spec, args: a.call.params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" },
                                purpose: a.title)
@@ -63,6 +67,7 @@ public struct Planner: Sendable {
 
     /// The parameter a bare value means for actions that take one ("~/x.zip" for trash_path is path=~/x.zip).
     static let mainParam = ["trash_path": "path", "reveal": "path", "open_url": "url", "open_settings_pane": "pane", "tool_cleanup": "tool"]
+        .merging(Recipes.mainParam) { a, _ in a }
 
     /// Small models put a whole command line in one string, leave empty strings, or copy placeholders like
     /// "--top TOP": split, drop empties, and drop placeholder values (with their flag) before checking.
@@ -126,9 +131,23 @@ public struct Planner: Sendable {
                                                safety: 10, confidence: 8, reason: sk.help,
                                                command: "bibi " + ([sk.name] + argv).map(Shell.quoteIfNeeded).joined(separator: " ")))])
         }
+        if s.tool.hasPrefix("app:") {
+            let name = String(s.tool.dropFirst(4))
+            guard let app = env.apps.catalog.app(name) else { return .failure(ActionError("there is no scriptable app \(name) on this Mac")) }
+            do {
+                let c = AppScripts.normalize(try AppScripts.parse(s.args), app, home: env.policy.home)
+                let script = try AppScripts.build(c, app)
+                let call = RunAppCall.call(app, c)
+                return collect([(call, BoundAction(call, title: purpose.ifEmpty(script.title), kind: script.risk.rawValue, target: app.name,
+                                                   safety: script.risk.safety, confidence: 6, reason: purpose.ifEmpty(script.title),
+                                                   command: script.steps.joined(separator: "; "), reversible: script.undoClass != nil))])
+            } catch {
+                return .failure(ActionError("\(name): \(error)"))
+            }
+        }
         if s.tool.hasPrefix("action:") {
             let id = String(s.tool.dropFirst(7))
-            guard let spec = registry.spec(id), spec.selectable, !["run_command", "run_command_admin", "run_skill"].contains(id) else {
+            guard let spec = registry.spec(id), spec.selectable, !["run_command", "run_command_admin", "run_skill", "run_app_call"].contains(id) else {
                 return .failure(ActionError("there is no action \(id)"))
             }
             var params: Params = [:]
@@ -140,11 +159,13 @@ public struct Planner: Sendable {
                 let key = String(a[..<eq]), value = String(a[a.index(after: eq)...])
                 params[key] = key == "path" ? Paths.standardize(CommandPolicy.expand(value, home: env.policy.home)) : value
             }
-            let call = ActionCall(id, params)
+            let call = ActionCall(id, spec.normalize(params, env))
             let steps = registry.preview(call, env)
             if let e = steps.error { return .failure(ActionError(e)) }
-            return collect([(call, BoundAction(call, title: purpose.ifEmpty(spec.summary), kind: id, target: params.values.sorted().joined(separator: " "),
-                                               safety: spec.reversible ? 8 : 6, confidence: 7, reason: spec.summary,
+            let safety = spec.kind == "read-only" ? 10 : spec.kind == "outbound" ? 3 : spec.reversible ? 8 : 6
+            return collect([(call, BoundAction(call, title: purpose.ifEmpty(spec.summary), kind: spec.kind ?? id,
+                                               target: call.params.values.sorted().joined(separator: " "),
+                                               safety: safety, confidence: 7, reason: spec.summary,
                                                command: steps.steps.joined(separator: "; "), privilege: spec.privilege,
                                                reversible: spec.reversible))])
         }

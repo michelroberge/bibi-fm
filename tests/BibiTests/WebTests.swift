@@ -130,7 +130,8 @@ import Testing
             "Compact": [compactAnswer],
         ])
         let graph = try GraphStore(path: tmp + "/bibi.db")
-        let harness = Harness(skills: [], store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph) { model }
+        let harness = Harness(skills: [], store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph,
+                              apps: testApps(tmp)) { model }
         let manager = RunManager(harness: harness)
         let app = Application(router: WebServer(harness: harness, token: "secret").makeRouter(manager: manager),
                               configuration: .init(address: .hostname("127.0.0.1", port: 0)))

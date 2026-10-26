@@ -159,6 +159,14 @@ public enum CommandPolicy {
         if name == "osascript" && args.contains(where: { $0.lowercased().contains("do shell script") }) {
             return refuse("AppleScript 'do shell script' would run a shell; propose the command itself")
         }
+        // The BSD mail tools hand messages to a local sendmail that isn't set up on a Mac: they fail or vanish.
+        if ["mail", "mailx", "sendmail"].contains(name) {
+            return refuse("\(name) can't deliver email on this Mac; use action:mail_send, which sends through your Mail accounts")
+        }
+        // Raw AppleScript could send mail or delete data with no risk class; app tools are checked against the app.
+        if name == "osascript" && args.contains(where: { $0.lowercased().contains("tell app") }) {
+            return refuse("AppleScript that controls an app must go through a listed action or app tool, so bibi can check what it does")
+        }
         guard exists(exe) else { return refuse("\(exe) is not installed on this Mac") }
 
         if name == "rm" {

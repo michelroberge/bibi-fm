@@ -269,8 +269,11 @@ async function decideChat(approve, skip, reason, dryRun) {
   const chosen = approve.map((i) => all.find((a) => a.id === i)).filter(Boolean);
   const admin = chosen.filter((a) => v.actionInfo[a.id]?.privilege === "admin");
   const irreversible = chosen.filter((a) => !v.actionInfo[a.id]?.reversible);
+  const outbound = chosen.filter((a) => a.kind === "outbound");
   if (chosen.length) {
     const notes = [h("ul", {}, chosen.map((a) => h("li", {}, a.title, h("div", { class: "small mono muted" }, a.command))))];
+    if (!dryRun && outbound.length) notes.push(h("p", { class: "small" }, h("strong", {}, `${outbound.length} will send a message or place a call as you. `),
+      "Check the recipients and text above: once sent, it can't be taken back."));
     if (!dryRun && irreversible.length) notes.push(h("p", { class: "small" }, `${irreversible.length} of these cannot be undone by bibi.`));
     if (!dryRun && admin.length) notes.push(h("p", { class: "small" }, h("strong", {}, `${admin.length} need administrator rights. `),
       "macOS will show its own password dialog for each one; bibi and this page never see your password."));

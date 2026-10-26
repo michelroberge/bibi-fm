@@ -34,7 +34,15 @@ let package = Package(
             ],
             resources: [.copy("Static")]
         ),
-        .executableTarget(name: "bibi", dependencies: ["BibiCore", "BibiSkills", "BibiWeb"]),
+        // The embedded Info.plist carries the usage descriptions macOS needs before it asks for Calendars,
+        // Reminders and Contacts access (a command-line tool has no bundle to hold them).
+        .executableTarget(
+            name: "bibi",
+            dependencies: ["BibiCore", "BibiSkills", "BibiWeb"],
+            exclude: ["Info.plist"],
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist",
+                                           "-Xlinker", Context.packageDirectory + "/Sources/bibi/Info.plist"])]
+        ),
         // Tests run as an executable (`swift run bibi-tests` / `make test`): with only the Command Line Tools,
         // `swift test` builds swift-testing suites but its runner never starts them.
         .executableTarget(
