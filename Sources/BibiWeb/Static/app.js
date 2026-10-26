@@ -175,7 +175,8 @@ function renderForm(form, s) {
 }
 
 // --- run view ------------------------------------------------------------------------------------
-const decisions = {};  // runId -> { actionId: "approve" | "skip" }
+// A Map and prototype-less objects, so a run or action id like "__proto__" can never reach Object.prototype.
+const decisions = new Map();  // runId -> { actionId: "approve" | "skip" }
 
 async function showRun(id) {
   const view = await api("runs/" + encodeURIComponent(id));
@@ -227,7 +228,8 @@ async function showRun(id) {
 function renderReport(view, body, id, subscribe) {
   const r = view.report;
   if (!r) { body.replaceChildren(h("div", { class: "panel" }, view.meta.error ? "This run failed: " + view.meta.error : "No report.")); return; }
-  const dec = (decisions[id] ||= {});
+  if (!decisions.has(id)) decisions.set(id, Object.create(null));
+  const dec = decisions.get(id);
   const obsById = Object.fromEntries(r.observations.map((o) => [o.id, o]));
   const executed = new Set(view.journal.filter((j) => j.event === "executed").map((j) => j.actionID));
 
@@ -406,7 +408,7 @@ async function execute(view, id, ids, dryRun, subscribe) {
   if (!(await confirmDialog(dryRun ? "Dry run these actions?" : "Run these actions?", [list, ...notes], dryRun ? "Dry run" : "Run", !dryRun && irreversible.length > 0))) return;
   bar().hidden = true;
   subscribe();
-  const decs = decisions[id];
+  const decs = decisions.get(id);
   try {
     const results = await api(`runs/${encodeURIComponent(id)}/execute`, { actions: ids, dryRun, confirmAdmin: admin.length > 0 });
     for (const k of ids) delete decs[k];
