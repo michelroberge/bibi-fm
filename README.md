@@ -106,9 +106,9 @@ Open **Chat** in the web UI and ask in plain words: "how much free disk space do
 
 Each turn:
 
-1. **Retrieve.** bibi looks up what is relevant in its graph (see [bibi.db](#bibidb)):
+1. **Retrieve.** bibi looks up what is relevant in its graph (see [bibi.db](#bibidb)). A request that isn't in English is translated first, keeping names, addresses and links as written, because examples, facts and embeddings are in English; the model still answers your own words.
    - skills whose keywords match the request, ranked by how often you approved their proposals
-   - up to three example requests that worked before, with the steps that answered them
+   - up to three example requests that worked before, with the steps that answered them. An example shares at least two words with your request, or one word and a tool your words select.
    - facts it remembered from earlier chats
 2. **Propose.** The model replies with the steps it wants to run, at most four. A step can be:
    - one of bibi's skills, for a thorough analysis
@@ -117,7 +117,7 @@ Each turn:
 3. **Check.** bibi's rules, not the model, decide what each step is and how risky it is (details below).
 4. **Approve.** Each step is a card with **Approve** / **Skip** and **Preview**. If you skip a step and say why, bibi adds an "Avoid:" note to that skill's guidance for next time.
 5. **Run and answer.** Approved steps run through the same harness as skills, so they are journaled and undoable where possible. Their output becomes evidence, and bibi answers from it. If a skill ran, its own recommendations come back as a new proposal to approve.
-6. **Compact.** Only the last four messages stay word for word. Older ones are folded into a running summary, because the on-device model has a context of about 4k tokens. Facts confirmed in the conversation are stored, but only if their words and numbers appear in what was said.
+6. **Compact.** Only the last four messages stay word for word. Older ones are folded into a running summary, because the on-device model has a context of about 4k tokens. Facts confirmed in the conversation are stored, but only if their words and numbers appear in what was said or seen. A request is not evidence: asking for an email doesn't make "an email was sent" a fact.
 
 How commands from chat are checked:
 - **One program with its arguments, never a shell.**
@@ -152,7 +152,7 @@ Built in (fixed scripts and Apple frameworks, so they behave the same every time
 
 - **Only people you named.** Every recipient must appear in the conversation: a name or address the model made up is refused.
 - **Cards you fill in.** Email, message, call, event and reminder steps are cards with their fields (to, from, subject, message; title, start, calendar…). Fill in or change any field on the card; pick from live choices (the addresses Mail sends from, your calendars, your reminder lists); or say it in chat ("mets plutôt le sujet: …"), which changes only that field on the same card. A field you typed yourself stays yours unless you ask to change it. Problems show under their field (nothing to say yet, a name that matches two people, a link that never came up in the conversation), and Approve only becomes available once there are none. While a card is open, the model sees the card instead of the messages that led to it.
-- **The model fixes what it can first.** If a step is refused, or a card has gaps your request already answers (writing the email from "tell him to look at the repo"), the model gets one more try with the reasons. Anything only you know stays on the card for you.
+- **The model fixes what it can first.** If a step is refused, or a card has gaps your request already answers (writing the email from "tell him to look at the repo"), the model gets one more try with the reasons. Anything only you know stays on the card for you. If your step is refused and only a step you didn't ask for is left (one an example brought in), that step isn't proposed on its own: the model retries yours.
 - **Names become exact addresses before you approve.** "Marie" is looked up in Contacts. The card shows `Marie Dupont <marie@example.com>`, or bibi says the name matches several people (or a person has several addresses) and asks which one.
 - **Dates become exact times when proposed.** "tomorrow 3pm" is shown as `2026-10-27 15:00`, so the card says exactly what will be created.
 - **Outbound steps show everything.** The card and the confirmation dialog show the recipients and the full text, and say it can't be taken back.
@@ -174,7 +174,7 @@ macOS normally charges a permission to the app a program was started from (Termi
 bibi records an event for everything that happens in chat: what you asked, what it proposed, and what you approved, skipped, ran or saw fail. These statistics feed back into chat:
 
 - **Ranking.** Skills whose proposals you approve more often rank higher. The rate is the posterior mean (approved + 1) / (decided + 2).
-- **Examples.** A request that worked becomes an example for similar requests later.
+- **Examples.** A request that worked becomes an example for similar requests later. Only the steps your words asked for are kept as its answer: an app action that ran but that the request didn't select is left out.
 - **Guidance.** Each skill has guidance text that is part of its prompt. It is versioned. Skipping with a reason adds an "Avoid:" line, up to five, kept newest first. You can also edit it on the **Skills** page.
 - **Rollback.** After ten decisions, if the current guidance is approved clearly less often than the previous version, bibi switches back to the previous version and logs it.
 
@@ -205,8 +205,8 @@ A learned skill only runs read-only commands by itself, and their output becomes
 | --- | --- | --- |
 | `skill`, `namespace` | the skill tree: `generic` (chat) → namespaces → skills, built-in and learned | `child_of`, `uses` (actions) |
 | `action` | registry actions | |
-| `intent` | each request asked in chat, its steps and outcome, plus starter examples | `contains` (conversation), `matched`, `example` |
-| `prompt`, `prompt_version` | every model instruction, versioned: chat, compaction, skill guidance, built-in skill prompts | `has_version`, `derived_from` |
+| `intent` | each request asked in chat (in English; your words are kept too), its steps and outcome, plus starter examples | `contains` (conversation), `matched`, `example`, `used` (the actions and skills that answered it) |
+| `prompt`, `prompt_version` | every model instruction, versioned: chat, translation, compaction, skill guidance, built-in skill prompts | `has_version`, `derived_from` |
 | `fact` | durable facts confirmed in chats | `from` (conversation) |
 | `conversation` | one chat | |
 
