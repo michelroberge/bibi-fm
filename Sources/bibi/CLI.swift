@@ -69,6 +69,7 @@ struct CLI {
             case "undo": return await undo(rest)
             case "diff": return diff(rest)
             case "skills": return skills(rest)
+            case "apps": return await apps(rest)
             default: break
             }
             if let skill = harness.skill(named: first) { return try await run(skill, rest) }
@@ -97,6 +98,8 @@ struct CLI {
           bibi diff <command> [--since]  compare the latest run with an earlier one
           bibi skills [candidates|show|accept|dismiss|disable|enable <name>]
                                          the skill tree, statistics and skills learned in chat
+          bibi apps [scan|show <app>|permissions]
+                                         the apps chat can use, and macOS permissions for them
         """)
         return 0
     }
@@ -114,7 +117,7 @@ struct CLI {
             print("    \(s.name.padding(toLength: 22, withPad: " ", startingAt: 0)) \(s.help)\(web)\(admin)")
         }
         print("\nRun 'bibi <command> --help' for details. [web] = may contact internet services; [admin] = some actions ask for your password.")
-        print("Also: bibi ui (chat with bibi there), bibi history, bibi undo, bibi diff, bibi skills")
+        print("Also: bibi ui (chat with bibi there), bibi history, bibi undo, bibi diff, bibi skills, bibi apps")
         return 0
     }
 
@@ -368,6 +371,56 @@ struct CLI {
             }
         default:
             fputs("usage: bibi skills [list|candidates|show <name>|accept|dismiss|disable|enable <name>]\n", stderr)
+            return 2
+        }
+    }
+
+    // MARK: apps chat can use
+
+    func apps(_ argv: [String]) async -> Int32 {
+        let catalog = harness.apps.catalog
+        switch argv.first ?? "list" {
+        case "list", "scan":
+            if argv.first == "scan" || catalog.apps.isEmpty {
+                catalog.scan()
+                if let graph = harness.graph { catalog.sync(graph) }
+            }
+            print("Built in: Mail (send, accounts), Calendar, Reminders, Contacts, FaceTime and phone calls, Messages.")
+            print("Scriptable apps chat can also use (bibi apps show <app> for details):")
+            for a in catalog.apps {
+                print("  \(a.name.padding(toLength: 22, withPad: " ", startingAt: 0)) \(a.commands.count) commands, \(a.classes.count) classes")
+            }
+            return 0
+        case "show":
+            guard argv.count == 2, let a = catalog.app(argv[1]) else {
+                fputs("usage: bibi apps show <app>   (bibi apps lists them)\n", stderr)
+                return 2
+            }
+            print("\(a.name) (\(a.bundleID))")
+            for c in a.commands {
+                let refused = AppScripts.refusal(ofCommand: c.name).map { _ in "  [refused]" } ?? ""
+                print("  command \(c.name) [\(AppScripts.risk(ofCommand: c.name).rawValue)]\(refused): \(Text.oneLine(c.help, max: 90))")
+            }
+            for name in Set(a.topElements + a.topElements.flatMap { a.cls($0)?.elements ?? [] }).sorted() {
+                guard let c = a.cls(name) else { continue }
+                print("  class \(c.name): \(c.properties.map { $0.writable ? $0.name : $0.name + " (r)" }.joined(separator: ", "))")
+            }
+            return 0
+        case "permissions":
+            // Each check asks macOS once; answers are kept in System Settings > Privacy & Security.
+            let services = harness.apps
+            let now = Date()
+            func check(_ what: String, _ body: () async throws -> Void) async {
+                do { try await body(); print("  \(what): allowed") } catch { print("  \(what): \(error)") }
+            }
+            print("Asking macOS for the permissions chat uses (answer each dialog):")
+            await check("Calendars") { _ = try await services.calendar.events(from: now, to: now.addingTimeInterval(60), calendar: nil) }
+            await check("Reminders") { _ = try await services.calendar.reminders(list: nil, includeCompleted: false) }
+            await check("Contacts") { _ = try await services.contacts.find("bibi permission check") }
+            await check("Mail (Automation)") { _ = try await services.scripts.run(MailAccounts.script, args: [], timeout: 60) }
+            return 0
+        default:
+            fputs("usage: bibi apps [scan|show <app>|permissions]\n", stderr)
             return 2
         }
     }

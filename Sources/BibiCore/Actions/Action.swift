@@ -78,9 +78,11 @@ public struct ActionEnv: Sendable {
     public var policy: SafetyPolicy
     public var admin: any AdminRunner
     public var reporter: any Reporter
+    public var apps: AppServices
 
-    public init(policy: SafetyPolicy = SafetyPolicy(), admin: any AdminRunner, reporter: any Reporter = SilentReporter()) {
-        self.policy = policy; self.admin = admin; self.reporter = reporter
+    public init(policy: SafetyPolicy = SafetyPolicy(), admin: any AdminRunner, reporter: any Reporter = SilentReporter(),
+                apps: AppServices = .system) {
+        self.policy = policy; self.admin = admin; self.reporter = reporter; self.apps = apps
     }
 }
 
@@ -92,6 +94,11 @@ public protocol ActionSpec: Sendable {
     var reversible: Bool { get }
     /// False for internal specs that only exist to undo others.
     var selectable: Bool { get }
+    /// The category chat shows ("read-only", "outbound"...); nil = the spec id.
+    var kind: String? { get }
+    /// Brings parameters the model wrote into the form validate accepts (dates in words → exact dates). Runs once,
+    /// when the step is proposed, so the card shows exactly what will run.
+    func normalize(_ p: Params, _ env: ActionEnv) -> Params
     func validate(_ p: Params, _ env: ActionEnv) throws
     /// Human-readable steps. Must not change anything.
     func plan(_ p: Params, _ env: ActionEnv) throws -> [String]
@@ -102,6 +109,8 @@ extension ActionSpec {
     public var selectable: Bool { true }
     public var reversible: Bool { false }
     public var privilege: Privilege { .user }
+    public var kind: String? { nil }
+    public func normalize(_ p: Params, _ env: ActionEnv) -> Params { p }
 
     public func require(_ p: Params, _ key: String) throws -> String {
         guard let v = p[key], !v.isEmpty else { throw ActionError("\(id): missing parameter \(key)") }

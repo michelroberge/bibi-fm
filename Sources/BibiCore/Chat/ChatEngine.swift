@@ -39,8 +39,9 @@ public final class ChatEngine: Sendable {
     var prompts: PromptBook { PromptBook(graph) }
 
     static let systemInstructions = """
-    You are bibi, an assistant running on the user's Mac. You answer questions about this Mac and do things on it.
+    You are bibi, an assistant running on the user's Mac. You answer questions about this Mac and do things on it, including with its apps: email, calendar, reminders, contacts, calls, messages and any other listed app.
     You cannot see the Mac yourself. To find something out or change something, propose steps: the user approves them, they run, and you get their results.
+    For an app, use a listed action or app tool. Write people's names and dates as the user said them ("Marie", "tomorrow 3pm"); bibi looks up the names in Contacts and turns the dates into exact times.
     steps: when the answer depends on this Mac (disk, versions, processes, settings, files, network) and it isn't in the results above, list the steps that find out or make the change, at most 4. Proposing steps is how you ask permission: never say you can't check, and never guess the state of the Mac.
     Usually one or two steps are enough; only include steps that serve this request. For a quick fact (free space, versions, what is running, a setting), one read-only command is best. Skills are slow, thorough analyses: use one only when the user wants a full check or cleanup. Use a listed action when it does exactly what was asked; otherwise use tool command. Never propose a change the user didn't ask for.
     No steps: when you can answer from the conversation and results, or to ask one short question when the request is ambiguous. Never invent command output or numbers.
@@ -66,7 +67,7 @@ public final class ChatEngine: Sendable {
                                "settings preferences pane open privacy firewall sharing battery login"),
         "tool_cleanup": ("tool=" + Tools.commands.keys.sorted().joined(separator: "|"),
                          "clean cleanup cache caches prune purge " + Tools.commands.keys.joined(separator: " ")),
-    ]
+    ].merging(Recipes.hints) { a, _ in a }
 
     static func turnSchema(_ tools: [String]) -> Schema {
         Schema("ChatTurn", [
@@ -174,9 +175,10 @@ public final class ChatEngine: Sendable {
     func think(_ run: RunRecord, _ state: inout ChatState, question: String?, emit: @escaping ChatEmit) async {
         let focus = question ?? state.recent.last(where: { $0.role == "user" })?.text ?? ""
         let v = embedder.vector(focus)
+        harness.apps.catalog.refresh(graph: graph)
         let skills = rankSkills(focus, v)
         let shown = question == nil ? [] : exampleIntents(focus)
-        let tools = toolCatalog(skills, request: focus, examples: shown)
+        let tools = toolCatalog(skills, request: focus, examples: shown, vector: v)
 
         var ctx = ContextBuilder()
         ctx.add("Tools", tools.text, priority: 0, maxChars: 2500)
@@ -238,7 +240,10 @@ public final class ChatEngine: Sendable {
         if !steps.isEmpty {
             let planner = Planner(registry: harness.registry, env: harness.env(admin: NoAdminRunner(), reporter: SilentReporter()),
                                   skill: { [harness] in harness.skill(named: $0) })
-            var plan = planner.bind(steps)
+            // Names become the one address Contacts has for them before anything is shown for approval.
+            let people = await Recipes.resolveRecipients(steps, contacts: harness.apps.contacts)
+            var plan = planner.bind(people.steps)
+            plan.refusals = people.refusals + plan.refusals
             // Steps already proposed in this chat (run or skipped) aren't offered again.
             let earlier = Set((run.report()?.actions ?? []).map { JSON.string($0.call) })
             plan.actions.removeAll { earlier.contains(JSON.string($0.call)) }
@@ -331,7 +336,7 @@ public final class ChatEngine: Sendable {
             .sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
     }
 
-    func toolCatalog(_ skills: [GraphNode], request: String, examples: [GraphNode]) -> (ids: [String], text: String) {
+    func toolCatalog(_ skills: [GraphNode], request: String, examples: [GraphNode], vector: [Float]? = nil) -> (ids: [String], text: String) {
         var ids = ["command"]
         var lines = [#"- command: any program; args = the program, then each argument. Examples: ["df", "-h", "/"] free disk space; ["sw_vers"] macOS version; ["ps", "-Ao", "pid,%cpu,%mem,comm", "-m"] processes by memory; ["du", "-sh", "~/Downloads"] folder size"#]
         let used = Set(examples.flatMap { SkillMiner.steps($0).map(\.tool) })
@@ -347,7 +352,31 @@ public final class ChatEngine: Sendable {
             ids.append("action:" + id)
             lines.append("- action:\(id) \(a.hint): \(spec.summary)")
         }
+        // Discovered app capabilities, except for apps a listed built-in action already covers.
+        let covered = Set(ids.compactMap { $0.hasPrefix("action:") ? Recipes.apps[String($0.dropFirst(7))] : nil })
+        for n in rankCapabilities(request, vector, examples: used) {
+            guard let bundle = n.props["app"]?.string, !covered.contains(bundle), let app = harness.apps.catalog.app(bundle),
+                  let hint = AppScripts.hint(app, op: n.props["op"]?.string ?? "", term: n.props["term"]?.string ?? "") else { continue }
+            if !ids.contains("app:" + app.name) { ids.append("app:" + app.name) }
+            lines.append(hint)
+        }
         return (ids, lines.joined(separator: "\n"))
+    }
+
+    /// Scriptable-app commands and classes whose words match the request (or that a retrieved example used),
+    /// ranked by those hits plus embedding similarity.
+    func rankCapabilities(_ text: String, _ v: [Float]?, examples used: Set<String>, limit: Int = 3) -> [GraphNode] {
+        let usedApps = Set(used.filter { $0.hasPrefix("app:") }.map { String($0.dropFirst(4)).lowercased() })
+        return graph.nodes(kind: "capability").compactMap { n -> (GraphNode, Double)? in
+            let hits = Similarity.hits(text, n.name + " " + n.text)
+            let example = usedApps.contains((n.name.split(separator: " ").first.map(String.init) ?? "").lowercased())
+            guard hits > 0 || example else { return nil }
+            var nv = graph.vector(n.id)
+            if nv == nil, let x = embedder.vector(n.text) { graph.setVector(n.id, x); nv = x }
+            let sim = nv.flatMap { a in v.map { Similarity.cosine(a, $0) } } ?? 0
+            return (n, Double(hits) + sim + (example ? 1 : 0))
+        }
+        .sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
     }
 
     /// Up to three requests that worked (learned or seeded) sharing words with this one, best first; learned

@@ -45,7 +45,8 @@ final class Events: @unchecked Sendable {
 
     func engine(_ model: ScriptedModel, skills: [any Skill] = []) -> (ChatEngine, Harness, GraphStore) {
         let graph = try! GraphStore(path: tmp + "/bibi.db")
-        let harness = Harness(skills: skills, store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph) { model }
+        let harness = Harness(skills: skills, store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph,
+                              apps: testApps(tmp)) { model }
         return (ChatEngine(harness: harness, graph: graph, embedder: NoEmbedder()), harness, graph)
     }
 
@@ -180,7 +181,7 @@ final class Events: @unchecked Sendable {
         graph.upsert(GraphNode(id: "skill:learned.touch", kind: "skill", name: "learned.touch", text: "Touch a file",
                                props: ["source": .string("learned"), "help": .string("Touch a file"), "params": .strings(["path"]),
                                        "steps": try JSON.decode(JSONValue.self, from: JSON.string(steps))]))
-        let harness = Harness(skills: [], store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph) {
+        let harness = Harness(skills: [], store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph, apps: testApps(tmp)) {
             ScriptedModel(["Summary": [.object(["summary": .string("listed")])]])
         }
         let skill = try #require(harness.skill(named: "learned.touch"))

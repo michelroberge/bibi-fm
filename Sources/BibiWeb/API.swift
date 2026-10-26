@@ -257,7 +257,7 @@ struct API: Sendable {
             var info: [String: ActionInfo] = [:]
             for a in report?.actions ?? [] {
                 if let s = harness.registry.spec(a.call.spec) {
-                    info[a.id] = ActionInfo(privilege: s.privilege, reversible: s.reversible, summary: s.summary)
+                    info[a.id] = ActionInfo(privilege: s.privilege, reversible: s.reversible || a.reversible, summary: s.summary)
                 }
             }
             let state = chat.state(run)
@@ -346,7 +346,7 @@ struct API: Sendable {
         var info: [String: ActionInfo] = [:]
         for a in report?.actions ?? [] {
             if let s = harness.registry.spec(a.call.spec) {
-                info[a.id] = ActionInfo(privilege: s.privilege, reversible: s.reversible, summary: s.summary)
+                info[a.id] = ActionInfo(privilege: s.privilege, reversible: s.reversible || a.reversible, summary: s.summary)
             }
         }
         return RunView(meta: run.meta, report: report, journal: run.journalEntries, undoable: run.undoable.compactMap(\.actionID),
