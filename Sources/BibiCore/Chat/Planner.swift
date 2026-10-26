@@ -132,8 +132,10 @@ public struct Planner: Sendable {
                 return .failure(ActionError("there is no action \(id)"))
             }
             var params: Params = [:]
+            // One bare value means the main parameter; several (e.g. a copied list of choices) mean nothing.
+            let bare = s.args.filter { !$0.contains("=") }
             for var a in s.args {
-                if !a.contains("="), let key = Self.mainParam[id] { a = key + "=" + a }
+                if !a.contains("="), bare.count == 1, let key = Self.mainParam[id] { a = key + "=" + a }
                 guard let eq = a.firstIndex(of: "=") else { return .failure(ActionError("\(id): expected key=value, got \(a)")) }
                 let key = String(a[..<eq]), value = String(a[a.index(after: eq)...])
                 params[key] = key == "path" ? Paths.standardize(CommandPolicy.expand(value, home: env.policy.home)) : value

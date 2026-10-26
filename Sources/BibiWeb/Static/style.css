@@ -25,7 +25,7 @@ code, pre, .mono { font-family: var(--mono); font-size: 13px; }
 pre { background: var(--code); padding: 10px 12px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; margin: 6px 0; }
 .top { display: flex; align-items: center; gap: 24px; padding: 12px 24px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
 .brand { font-weight: 700; font-size: 18px; color: var(--text); display: flex; align-items: center; gap: 8px; }
-.logo { width: 46px; height: 29px; flex: none; background: var(--accent); -webkit-mask: url(/logo.svg) center / contain no-repeat; mask: url(/logo.svg) center / contain no-repeat; }
+.logo { width: 46px; height: 29px; flex: none; will-change: transform; background: var(--accent); -webkit-mask: url(/logo.svg) center / contain no-repeat; mask: url(/logo.svg) center / contain no-repeat; }
 nav { display: flex; gap: 16px; flex: 1; }
 nav a { color: var(--muted); font-weight: 500; }
 nav a.active { color: var(--text); }
@@ -106,7 +106,11 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 0; margin: 16px 0 0; }
 .empty { text-align: center; padding: 40px; color: var(--muted); }
 textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); width: 100%; resize: vertical; }
-.chatpage { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
+.chatpage { display: grid; grid-template-columns: 200px minmax(0, 1fr) 210px; gap: 20px; align-items: start; }
+main:has(.chatpage) { max-width: 1320px; }
+.quick { position: sticky; top: 72px; display: grid; gap: 8px; }
+.quickrun { padding: 10px 12px; }
+.quickrun .muted { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .chats { position: sticky; top: 72px; display: grid; gap: 10px; }
 .chatlist { display: grid; gap: 2px; max-height: calc(100vh - 220px); overflow-y: auto; }
 .chatlist a { color: var(--text); padding: 6px 8px; border-radius: 8px; font-size: 14px; }
@@ -128,12 +132,20 @@ textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line); bord
 .composer { position: sticky; bottom: 0; display: flex; gap: 8px; align-items: flex-end; background: var(--bg); padding: 10px 0 16px; }
 .composer button { flex: none; }
 .candidate { border-left: 4px solid var(--accent) !important; padding-left: 12px !important; }
+@media (max-width: 1000px) {
+  .chatpage { grid-template-columns: 180px minmax(0, 1fr); }
+  .quick { grid-column: 1 / -1; order: -1; position: static; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+  .quick .ns, .quick > a { grid-column: 1 / -1; }
+}
 @media (max-width: 640px) {
   .top { gap: 12px; padding: 10px 16px; }
   #version { display: none; }
   main { padding: 16px 16px 140px; }
   th:nth-child(4), td:nth-child(4) { display: none; }
   .chatpage { grid-template-columns: 1fr; gap: 8px; }
+  .quick { position: static; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); order: -1; }
+  .quick .ns, .quick > a { grid-column: 1 / -1; }
+  .quickrun .muted { display: none; }
   .chats { position: static; }
   .chatlist { max-height: 120px; }
   .msg, .msg.bibi, .msg.outcome { max-width: 100%; width: 100%; }

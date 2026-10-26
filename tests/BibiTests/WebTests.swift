@@ -173,4 +173,33 @@ import Testing
                                      body: ByteBuffer(string: "{}")) { #expect($0.status == .badRequest) }
         }
     }
+
+    @Test func quickRunInChat() async throws {
+        let file = tmp + "/quick.bin"
+        write(file, mb: 1)
+        let model = ScriptedModel(["ChatAnswer": [turn("run", reply: "It found one old file.")], "Compact": [compactAnswer]])
+        let graph = try GraphStore(path: tmp + "/bibi.db")
+        let harness = Harness(skills: [FakeSkill(file: file)], store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph) { model }
+        let manager = RunManager(harness: harness)
+        let app = Application(router: WebServer(harness: harness, token: "secret").makeRouter(manager: manager),
+                              configuration: .init(address: .hostname("127.0.0.1", port: 0)))
+        try await app.test(.live) { client in
+            let quick = try await get(client, "/api/graph/quick", JSONValue.self)
+            #expect(quick.array?.map { $0["name"]?.string } == ["test.fake"])
+            let start = try await post(client, "/api/chat/quick", #"{"skill":"test.fake"}"#)
+            let id = try #require(start["id"]?.string)
+            var view = JSONValue.null
+            for _ in 0..<100 {
+                view = try await get(client, "/api/chat/\(id)", JSONValue.self)
+                if view["busy"] == nil || view["busy"] == .null, view["transcript"]?.array?.count ?? 0 >= 3 { break }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            // The skill ran without a model turn; its recommendation is now the open proposal, not yet run.
+            #expect(view["transcript"]?.array?.first?["text"]?.string == "Run test.fake")
+            #expect(view["transcript"]?.array?.last?["text"]?.string == "It found one old file.")
+            #expect(view["state"]?["pending"]?.string == "F2")
+            #expect(Paths.exists(file))
+            #expect(graph.stats("skill:test.fake")["quick"] == 1)
+        }
+    }
 }

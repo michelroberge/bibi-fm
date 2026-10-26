@@ -53,6 +53,7 @@ public enum Diagnostics {
         .init(id: "pmset_therm", title: "Thermal and performance warnings", argv: ["pmset", "-g", "therm"], admin: false, categories: ["thermal"], timeout: 10),
         .init(id: "battery_info", title: "Battery condition, capacity and cycle count", argv: ["system_profiler", "SPPowerDataType"], admin: false, categories: ["battery"], timeout: 30),
         .init(id: "log_process", title: "Last 10 minutes of log messages from a process", argv: ["log", "show", "--last", "10m", "--style", "compact", "--process", "{process}"], admin: false, categories: ["crash", "log"], timeout: 60),
+        .init(id: "log_process_faults", title: "Faults a process logged in the last 15 minutes", argv: ["log", "show", "--last", "15m", "--style", "compact", "--predicate", "process == \"{process}\" AND messageType == fault"], admin: false, categories: ["log"], timeout: 60),
         .init(id: "log_faults", title: "Faults logged in the last 15 minutes", argv: ["log", "show", "--last", "15m", "--style", "compact", "--predicate", "messageType == fault"], admin: false, categories: ["log", "crash"], timeout: 60),
         .init(id: "crash_reports", title: "Recent crash reports", argv: ["ls", "-lt", NSHomeDirectory() + "/Library/Logs/DiagnosticReports"], admin: false, categories: ["crash"], timeout: 10),
         .init(id: "lsof_listen", title: "Processes listening on TCP ports", argv: ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], admin: false, categories: ["network", "listener"], timeout: 20),

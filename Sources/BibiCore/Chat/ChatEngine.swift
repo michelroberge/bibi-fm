@@ -55,13 +55,17 @@ public final class ChatEngine: Sendable {
     facts: durable facts about this Mac or the user that a command result or the user stated in these messages, at most five, each copied closely from the message. None if there are none.
     """
 
-    /// Registry actions offered in every chat, with how to fill their parameters.
-    static let actionHints: [String: String] = [
-        "trash_path": "path=/absolute/path",
-        "reveal": "path=/absolute/path",
-        "open_url": "url=https://...",
-        "open_settings_pane": "pane=" + OpenSettingsPane.panes.keys.sorted().joined(separator: "|"),
-        "tool_cleanup": "tool=" + Tools.commands.keys.sorted().joined(separator: "|"),
+    /// Registry actions chat can offer: how to fill their parameters, and the words that make them relevant.
+    /// An action is only offered when the request uses one of its words (or a retrieved example used it):
+    /// a small model picks whatever is listed.
+    static let actionHints: [String: (hint: String, words: String)] = [
+        "trash_path": ("path=/absolute/path", "delete remove trash erase get rid"),
+        "reveal": ("path=/absolute/path", "show reveal finder locate where"),
+        "open_url": ("url=https://...", "open website web page url link browser"),
+        "open_settings_pane": ("pane=" + OpenSettingsPane.panes.keys.sorted().joined(separator: "|"),
+                               "settings preferences pane open privacy firewall sharing battery login"),
+        "tool_cleanup": ("tool=" + Tools.commands.keys.sorted().joined(separator: "|"),
+                         "clean cleanup cache caches prune purge " + Tools.commands.keys.joined(separator: " ")),
     ]
 
     static func turnSchema(_ tools: [String]) -> Schema {
@@ -141,19 +145,21 @@ public final class ChatEngine: Sendable {
         let focus = question ?? state.recent.last(where: { $0.role == "user" })?.text ?? ""
         let v = embedder.vector(focus)
         let skills = rankSkills(focus, v)
-        let tools = toolCatalog(skills)
+        let shown = question == nil ? [] : exampleIntents(focus)
+        let tools = toolCatalog(skills, request: focus, examples: shown)
 
         var ctx = ContextBuilder()
         ctx.add("Tools", tools.text, priority: 0, maxChars: 2500)
         ctx.add("Conversation so far", state.summary, priority: 3, maxChars: 1200)
         ctx.add("Known facts", facts(focus, v), priority: 4, maxChars: 600)
         if question != nil {
-            ctx.add("Examples of requests and the steps that answered them", examples(focus), priority: 1, maxChars: 700)
+            ctx.add("Examples of requests and the steps that answered them", examples(shown), priority: 1, maxChars: 700)
         }
         ctx.add("Recent messages", recentText(state, dropLastUser: question != nil), priority: 2, maxChars: 2000)
         ctx.add("Results of the steps the user approved", state.results.joined(separator: "\n\n"), priority: 0, maxChars: 2500)
+        ctx.add("Commands that check the latest findings", (state.hints ?? []).joined(separator: "\n"), priority: 1, maxChars: 900)
         ctx.add(question == nil ? "Task" : "User",
-                question ?? "Answer the user's last request from these results, with the numbers that matter. If they don't answer it, say what is missing.",
+                question ?? "Answer the user's last request from these results: quote or summarize the output lines that answer it, with the numbers that matter. If they don't answer it, say what is missing.",
                 priority: 0)
 
         let generic = prompts.active("skill.generic", default: "")
@@ -295,27 +301,28 @@ public final class ChatEngine: Sendable {
             .sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
     }
 
-    func toolCatalog(_ skills: [GraphNode]) -> (ids: [String], text: String) {
-        var ids: [String] = [], lines: [String] = []
+    func toolCatalog(_ skills: [GraphNode], request: String, examples: [GraphNode]) -> (ids: [String], text: String) {
+        var ids = ["command"]
+        var lines = [#"- command: any program; args = the program, then each argument. Examples: ["df", "-h", "/"] free disk space; ["sw_vers"] macOS version; ["ps", "-Ao", "pid,%cpu,%mem,comm", "-m"] processes by memory; ["du", "-sh", "~/Downloads"] folder size"#]
+        let used = Set(examples.flatMap { SkillMiner.steps($0).map(\.tool) })
         for n in skills {
             guard let s = harness.skill(named: n.name) else { continue }
             ids.append("skill:" + s.name)
             let guidance = prompts.text("skill." + s.name, default: s.help)
             lines.append("- skill:\(s.name) (thorough, takes a minute): \(Text.oneLine(guidance, max: 300)) \(GraphSync.example(s.params))")
         }
-        for (id, hint) in Self.actionHints.sorted(by: { $0.key < $1.key }) {
-            guard let spec = harness.registry.spec(id) else { continue }
+        for (id, a) in Self.actionHints.sorted(by: { $0.key < $1.key }) {
+            guard let spec = harness.registry.spec(id),
+                  used.contains("action:" + id) || Similarity.hits(request, a.words) > 0 else { continue }
             ids.append("action:" + id)
-            lines.append("- action:\(id) \(hint): \(spec.summary)")
+            lines.append("- action:\(id) \(a.hint): \(spec.summary)")
         }
-        ids.append("command")
-        lines.append(#"- command: any program; args = the program, then each argument. Examples: ["df", "-h", "/"] free disk space; ["sw_vers"] macOS version; ["ps", "-Ao", "pid,%cpu,%mem,comm", "-m"] processes by memory; ["du", "-sh", "~/Downloads"] folder size"#)
         return (ids, lines.joined(separator: "\n"))
     }
 
     /// Up to three requests that worked (learned or seeded) sharing words with this one, best first; learned
     /// ones win ties and frequently matched ones rank higher.
-    func examples(_ text: String) -> String {
+    func exampleIntents(_ text: String) -> [GraphNode] {
         let terms = Similarity.terms(text)
         let ranked = graph.nodes(kind: "intent").filter { $0.props["outcome"]?.string == "ok" }
             .compactMap { n -> (GraphNode, Double)? in
@@ -325,12 +332,16 @@ public final class ChatEngine: Sendable {
                 return (n, Double(hits) + (n.props["seed"] == nil ? 0.5 : 0) + min(1, used / 10))
             }
             .sorted { $0.1 > $1.1 }
-        var seen = Set<String>(), lines: [String] = []
-        for (n, _) in ranked where lines.count < 3 && seen.insert(n.text.lowercased()).inserted {
+        var seen = Set<String>(), out: [GraphNode] = []
+        for (n, _) in ranked where out.count < 3 && seen.insert(n.text.lowercased()).inserted { out.append(n) }
+        return out
+    }
+
+    func examples(_ intents: [GraphNode]) -> String {
+        intents.map { n in
             let steps = SkillMiner.steps(n).map { "\($0.tool) " + JSON.string($0.args) }.joined(separator: "; ")
-            lines.append("\"\(Text.oneLine(n.text, max: 100))\" → \(steps)")
-        }
-        return lines.joined(separator: "\n")
+            return "\"\(Text.oneLine(n.text, max: 100))\" → \(steps)"
+        }.joined(separator: "\n")
     }
 
     func facts(_ text: String, _ v: [Float]?) -> String {
@@ -351,6 +362,48 @@ public final class ChatEngine: Sendable {
     }
 
     // MARK: decisions
+
+    /// Runs a skill from the chat page's quick-run list: the click is the request and the approval. Skills only
+    /// analyze; anything they recommend comes back as a proposal that needs its own approval.
+    public func quickRun(_ run: RunRecord, skill name: String, admin: any AdminRunner, emit: @escaping ChatEmit) async throws -> [ExecResult] {
+        guard let skill = harness.skill(named: name) else { throw ActionError("there is no skill \(name)") }
+        var state = state(run)
+        if state.turns == 0 {
+            state.title = "Run \(skill.name)"
+            var report = run.report() ?? SkillResult(summary: state.title)
+            report.summary = state.title
+            run.save(report)
+            graph.update("conversation:" + run.id) { $0.name = state.title }
+        }
+        state.turns += 1
+        state.results = []
+        state.intent = nil
+        say(run, &state, ChatMessage("user", "Run \(skill.name)"), emit)
+        let call = ActionCall("run_skill", ["skill": skill.name, "argv": "[]"])
+        let fid = addProposal(run, title: "Run \(skill.name)", explanation: skill.help,
+                              actions: [BoundAction(call, title: "Run \(skill.name)", kind: "skill", target: skill.name, safety: 10,
+                                                    confidence: 10, reason: skill.help, command: "bibi \(skill.name)")])
+        state.pending = fid
+        state.skill = GraphSync.skillID(skill.name)
+        state.guidance = nil
+        graph.record("quick", node: GraphSync.skillID(skill.name), conversation: run.id)
+        save(run, state)
+        let ids = run.report()?.findings.first { $0.id == fid }?.recommendations.map(\.id) ?? []
+        return try await decide(run, ChatDecision(approve: ids), admin: admin, emit: emit)
+    }
+
+    /// Skills for the quick-run list, most used first: runs in history (terminal, web, chat) plus quick runs.
+    public func quickSkills(limit: Int = 6) -> [SkillLibrary.SkillView] {
+        var uses: [String: Int] = [:]
+        for r in harness.store.list() where r.meta.skill != "chat" { uses[r.meta.skill, default: 0] += 1 }
+        return harness.sortedSkills.compactMap { s -> (SkillLibrary.SkillView, Int)? in
+            guard let n = graph.node(GraphSync.skillID(s.name)), n.status == "active", s.params.allSatisfy({ !$0.required }) else { return nil }
+            var v = SkillLibrary.view(n, graph: graph)
+            v.help = s.help
+            return (v, uses[s.name, default: 0] + v.stats["quick", default: 0])
+        }
+        .sorted { ($0.1, $1.0.name) > ($1.1, $0.0.name) }.prefix(limit).map(\.0)
+    }
 
     /// Records the user's decisions, runs what was approved (through the harness: validation, journal, admin
     /// confirmation), then lets the model answer from the results and learns from what worked.
@@ -390,9 +443,10 @@ public final class ChatEngine: Sendable {
                                             adminConfirmed: d.adminConfirmed, dryRun: d.dryRun, frontend: "chat")
         var next: String?
         for a in approved where a.call.spec == "run_skill" {
-            let (r, fid) = await runSkill(a, run, dryRun: d.dryRun, reporter: reporter)
+            let (r, fid, hints) = await runSkill(a, run, dryRun: d.dryRun, reporter: reporter)
             results.append(r)
             if let fid { next = fid }
+            if !hints.isEmpty { state.hints = hints }
         }
 
         for r in results {
@@ -401,7 +455,7 @@ public final class ChatEngine: Sendable {
             if !d.dryRun { graph.record(r.ok ? "executed" : "failed", node: owner, conversation: run.id) }
         }
         state.results = results.map { r in
-            "\(r.ok ? "OK" : "FAILED") \(r.title): \(r.message)" + (r.output.map { "\n" + Text.clip($0, max: 1500) } ?? "")
+            "\(r.ok ? "OK" : "FAILED") \(r.title): \(r.message)" + (r.output.map { "\n" + Text.clip(Text.collapseRepeats($0), max: 1500) } ?? "")
         }
         if let pending = state.pending, let f = run.report()?.findings.first(where: { $0.id == pending }) {
             let decided = Set(d.approve + d.skip).union(done)
@@ -433,18 +487,18 @@ public final class ChatEngine: Sendable {
 
     /// Runs a skill the user approved from chat. Its summary becomes evidence; its recommendations come back as
     /// a new proposal in this chat (so they need their own approval). Returns that proposal's id.
-    func runSkill(_ a: BoundAction, _ run: RunRecord, dryRun: Bool, reporter: any Reporter) async -> (ExecResult, String?) {
+    func runSkill(_ a: BoundAction, _ run: RunRecord, dryRun: Bool, reporter: any Reporter) async -> (ExecResult, String?, [String]) {
         let name = a.call.params["skill"] ?? "", argv = CommandPolicy.decode(a.call.params["argv"] ?? "[]") ?? []
-        func fail(_ m: String) -> (ExecResult, String?) {
+        func fail(_ m: String) -> (ExecResult, String?, [String]) {
             run.journal(JournalEntry(.failed, actionID: a.id, title: a.title, call: a.call, error: m, frontend: "chat"))
-            return (ExecResult(actionID: a.id, title: a.title, ok: false, message: m, reversible: false), nil)
+            return (ExecResult(actionID: a.id, title: a.title, ok: false, message: m, reversible: false), nil, [])
         }
         guard let skill = harness.skill(named: name) else { return fail("unknown skill \(name)") }
         run.journal(JournalEntry(.selected, actionID: a.id, title: a.title, call: a.call, frontend: "chat"))
         if dryRun {
             let m = "[dry-run] would run bibi \(name) \(Shell.join(argv))"
             run.journal(JournalEntry(.dryRun, actionID: a.id, title: a.title, call: a.call, message: m, frontend: "chat"))
-            return (ExecResult(actionID: a.id, title: a.title, ok: true, message: m, reversible: false), nil)
+            return (ExecResult(actionID: a.id, title: a.title, ok: true, message: m, reversible: false), nil, [])
         }
         do {
             let (child, result) = try await harness.run(skill, argv: argv, reporter: reporter)
@@ -462,10 +516,25 @@ public final class ChatEngine: Sendable {
                 message += "; \(recs.count) recommendation(s) to review"
             }
             run.journal(JournalEntry(.executed, actionID: a.id, title: a.title, call: a.call, message: message, frontend: "chat"))
-            return (ExecResult(actionID: a.id, title: a.title, ok: true, message: message, reversible: false, output: text), fid)
+            return (ExecResult(actionID: a.id, title: a.title, ok: true, message: message, reversible: false, output: text), fid,
+                    Self.hints(result.findings))
         } catch {
             return fail("\(error)")
         }
+    }
+
+    /// The read-only diagnostic commands of a skill's top findings, filled in for their subject, as
+    /// "finding → [argv]" lines the model can copy.
+    static func hints(_ findings: [Finding], limit: Int = 6) -> [String] {
+        var seen = Set<String>(), out: [String] = []
+        for f in findings.prefix(8) {
+            for id in f.diagnostics {
+                guard out.count < limit, let d = Diagnostics.get(id), !d.admin, let argv = d.command(subject: f.subject),
+                      seen.insert(argv.joined(separator: " ")).inserted else { continue }
+                out.append("\(Text.oneLine(f.title, max: 70)) → command \(JSON.string(argv))")
+            }
+        }
+        return out
     }
 
     /// Remembers what worked for this request and drafts a skill when the same request keeps coming back.

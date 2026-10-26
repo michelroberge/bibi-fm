@@ -91,6 +91,18 @@ public enum Text {
         return head + "\n… (\(s.count - max) characters cut) …\n" + tail
     }
 
+    /// Keeps the first of lines that differ only in numbers (timestamps, pids), noting how often each repeated.
+    /// Log output is mostly repetition; this leaves room for the lines that differ.
+    public static func collapseRepeats(_ s: String) -> String {
+        var order: [String] = [], first: [String: String] = [:], count: [String: Int] = [:]
+        for line in s.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let key = String(line.filter { !$0.isNumber })
+            if first[key] == nil { order.append(key); first[key] = line }
+            count[key, default: 0] += 1
+        }
+        return order.map { k in count[k]! > 1 ? first[k]! + "  (×\(count[k]!))" : first[k]! }.joined(separator: "\n")
+    }
+
     /// Lowercase words joined by dashes, for ids and names.
     public static func slug(_ s: String, maxWords: Int = 4) -> String {
         Similarity.tokens(s).filter { !Similarity.stopwords.contains($0) }.prefix(maxWords).joined(separator: "-").ifEmpty("skill")

@@ -214,10 +214,17 @@ func tempGraph() -> GraphStore { try! GraphStore(path: tempDir() + "/bibi.db") }
         let tmp = tempDir()
         let reveal = try planner.bind(PlannedStep(tool: "action:reveal", args: [tmp])).get()
         #expect(reveal.first?.call.params["path"] == tmp)
+        // A copied list of choices is not a value.
+        #expect(throws: ActionError.self) { try planner.bind(PlannedStep(tool: "action:tool_cleanup", args: ["brew", "npm", "yarn"])).get() }
         // Placeholders copied from the option list are dropped with their flag.
         #expect(Planner.tidy(PlannedStep(tool: "skill:x", args: ["--top TOP --depth 3"])).args == ["--depth", "3"])
         // The runner-only specs can't be proposed directly.
         #expect(throws: ActionError.self) { try planner.bind(PlannedStep(tool: "action:run_command", args: ["argv=[\"ls\"]"])).get() }
+    }
+
+    @Test func collapsesRepeatedLogLines() {
+        let log = "Timestamp\n16:23:16.671 F accountsd[985:a3054] denied\n16:23:17.002 F accountsd[985:a3055] denied\nother"
+        #expect(Text.collapseRepeats(log) == "Timestamp\n16:23:16.671 F accountsd[985:a3054] denied  (×2)\nother")
     }
 
     @Test func replyGuards() {

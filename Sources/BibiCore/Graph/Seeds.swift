@@ -16,6 +16,8 @@ public enum Seeds {
         ("what is my IP address", [.init(tool: "command", args: ["ipconfig", "getifaddr", "en0"])]),
         ("how is my battery health", [.init(tool: "command", args: ["system_profiler", "SPPowerDataType"])]),
         ("how long since the last restart", [.init(tool: "command", args: ["uptime"])]),
+        ("show recent log messages and faults from the Safari process",
+         [.init(tool: "command", args: ["log", "show", "--last", "10m", "--style", "compact", "--process", "Safari"])]),
         ("which Homebrew packages are outdated", [.init(tool: "command", args: ["brew", "outdated"])]),
         ("open the privacy settings", [.init(tool: "action:open_settings_pane", args: ["pane=privacy"])]),
         ("clean the npm cache", [.init(tool: "action:tool_cleanup", args: ["tool=npm"])]),

@@ -84,16 +84,17 @@ async function route() {
   bar().hidden = true;
   const hash = location.hash.slice(1) || "/";
   const [, view, id] = hash.split("/");
-  for (const a of document.querySelectorAll("nav a")) {
-    a.classList.toggle("active", a.dataset.nav === (view || "home") || (view === "run" && a.dataset.nav === "home"));
-  }
+  // Chat is the home page; the skill launcher lives at #/run.
+  const section = !view || view === "chat" ? "chat" : view === "run" ? "home" : view;
+  for (const a of document.querySelectorAll("nav a")) a.classList.toggle("active", a.dataset.nav === section);
   try {
-    if (view === "chat") { await showChat(id ? decodeURIComponent(id) : ""); return; }
+    if (section === "chat") { await showChat(id ? decodeURIComponent(id) : ""); return; }
     else if (view === "skills") await showSkills();
     else if (view === "run" && id) await showRun(decodeURIComponent(id));
+    else if (view === "run") await showHome();
     else if (view === "history") await showHistory();
     else if (view === "diff") await showDiff(id ? decodeURIComponent(id) : "");
-    else await showHome();
+    else await showChat("");
   } catch (e) {
     app().replaceChildren(errorBox(e));
   }
@@ -472,6 +473,35 @@ async function showDiff(skill) {
     h("div", { class: "row" }, select, since), out);
   load();
 }
+
+// --- logo: slow free tumble about its centre ---------------------------------------------------------
+(() => {
+  const logo = document.querySelector(".logo");
+  if (!logo || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const speed = 0.5; // rad/s
+  let q = [1, 0, 0, 0]; // orientation quaternion [w, x, y, z]
+  let last = performance.now();
+  const frame = (now) => {
+    const dt = Math.min(now - last, 100) / 1000, t = now / 1000;
+    last = now;
+    // The spin axis wanders over the sphere; incommensurate periods keep the path from repeating.
+    const ax = Math.sin(t * 0.13), ay = Math.sin(t * 0.17 + 2), az = 0.5 * Math.sin(t * 0.07 + 4);
+    const half = speed * dt / 2, s = Math.sin(half) / (Math.hypot(ax, ay, az) || 1);
+    const [bw, bx, by, bz] = [Math.cos(half), ax * s, ay * s, az * s];
+    const [w, x, y, z] = q;
+    q = [bw * w - bx * x - by * y - bz * z,
+         bw * x + bx * w + by * z - bz * y,
+         bw * y - bx * z + by * w + bz * x,
+         bw * z + bx * y - by * x + bz * w];
+    const n = Math.hypot(...q) * (q[0] < 0 ? -1 : 1);
+    q = q.map((v) => v / n);
+    const angle = 2 * Math.acos(Math.min(1, q[0]));
+    const [rx, ry, rz] = angle > 1e-6 ? q.slice(1) : [0, 0, 1];
+    logo.style.transform = `perspective(160px) rotate3d(${rx}, ${ry}, ${rz}, ${angle}rad)`;
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+})();
 
 // --- start -------------------------------------------------------------------------------------------
 (async () => {

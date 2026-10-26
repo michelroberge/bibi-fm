@@ -198,7 +198,7 @@ public struct SysHealth: Skill {
                 let o = ev.observe(fout, "\(process) logged \(n) faults in the last \(minutes) minutes")
                 ev.find("log", "\(process) is logging many faults (\(n) in \(minutes) min)", severity: .low, cites: [o], confidence: 50,
                         explanation: "Faults are errors a component considers serious. A steady stream from one process often goes with high CPU, failing sync or a crash loop.",
-                        diagnostics: ["log_process"], subject: ["process": process])
+                        diagnostics: ["log_process_faults", "log_process"], subject: ["process": process])
             }
         }
 

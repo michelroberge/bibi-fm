@@ -2,12 +2,13 @@
 // Chat with bibi, and the Skills page. Loaded before app.js; uses its helpers (h, api, token, recommendation,
 // confirmDialog, decisions, currentStream) at call time.
 
-const chatUI = { id: "", view: null, lastSeq: 0, draft: "", running: new Set() };
+const chatUI = { id: "", view: null, lastSeq: 0, draft: "", running: new Set(), quick: [] };
 
 async function showChat(id) {
   chatUI.id = id;
   chatUI.lastSeq = 0;
-  const chats = await api("chats").catch(() => []);
+  const [chats, quick] = await Promise.all([api("chats").catch(() => []), api("graph/quick").catch(() => [])]);
+  chatUI.quick = quick;
   chatUI.view = id ? await api("chat/" + encodeURIComponent(id)) : null;
   renderChat(chats);
   if (chatUI.view?.busy) followChat();
@@ -50,12 +51,39 @@ function renderChat(chats) {
     h("span", { class: "row small" },
       v.undoable.length ? h("a", { href: "#/run/" + encodeURIComponent(id) }, `${v.undoable.length} undoable`) : null,
       h("a", { href: "#/run/" + encodeURIComponent(id), title: "Evidence, the journal of what ran, and undo" }, "Details"))) : h("h1", {}, "Chat");
-  app().replaceChildren(h("div", { class: "chatpage" }, side, h("section", { class: "chatmain" }, head, list, composer)));
+  app().replaceChildren(h("div", { class: "chatpage" }, side, h("section", { class: "chatmain" }, head, list, composer), quickPanel()));
   setBusy(!!v?.busy);
   renderChatBar();
   list.scrollIntoView({ block: "end" });
   window.scrollTo(0, document.body.scrollHeight);
   input.focus();
+}
+
+// Most-used skills, one click away. A quick run happens in the current chat (or starts one).
+function quickPanel() {
+  if (!chatUI.quick.length) return h("aside", { class: "quick" });
+  return h("aside", { class: "quick" },
+    h("div", { class: "ns", style: "margin-top:0" }, "Quick run"),
+    chatUI.quick.map((s) => h("button", { class: "card quickrun", type: "button", title: s.help, onclick: () => quickRun(s.name) },
+      h("div", { class: "spread" }, h("strong", { class: "small" }, s.name), s.source === "learned" ? h("span", { class: "pill accent" }, "learned") : null),
+      h("div", { class: "muted small" }, s.help))),
+    h("a", { class: "small", href: "#/run" }, "All skills and options →"));
+}
+
+async function quickRun(skill) {
+  if (chatUI.view?.busy) return;
+  try {
+    const r = await api("chat/quick", { conversation: chatUI.id || undefined, skill });
+    if (r.id !== chatUI.id) history.replaceState(null, "", "#/chat/" + encodeURIComponent(r.id));
+    chatUI.id = r.id;
+    chatUI.lastSeq = 0;
+    chatUI.view = await api("chat/" + encodeURIComponent(r.id));
+    renderChat(await api("chats"));
+    setBusy(true);
+    followChat();
+  } catch (e) {
+    document.getElementById("chatlog")?.append(h("div", { class: "msg note" }, e.message));
+  }
 }
 
 function chatMessage(m, byFinding) {

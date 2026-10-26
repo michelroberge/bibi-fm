@@ -70,6 +70,11 @@ struct DecideBody: Decodable {
     var dryRun: Bool?
 }
 
+struct QuickBody: Decodable {
+    var conversation: String?
+    var skill: String
+}
+
 struct GuidanceBody: Decodable {
     var text: String
 }
@@ -280,6 +285,30 @@ struct API: Sendable {
             return json(["ok": true])
         }
 
+        api.get("graph/quick") { _, _ in json(try engine().quickSkills()) }
+        api.post("chat/quick") { req, _ in
+            let chat = try engine()
+            let b = try await decode(req, QuickBody.self)
+            guard harness.skill(named: b.skill) != nil else { throw HTTPError(.notFound, message: "unknown skill \(b.skill)") }
+            let run: RunRecord
+            if let id = b.conversation, !id.isEmpty {
+                guard let r = harness.store.find(id), r.meta.skill == "chat" else { throw HTTPError(.notFound, message: "no chat \(id)") }
+                run = r
+            } else {
+                run = try chat.start()
+            }
+            let hub = manager.hub(run.id)
+            guard hub.begin("decide") else { throw HTTPError(.conflict, message: "bibi is still busy with this chat (\(hub.busy ?? ""))") }
+            Task {
+                do {
+                    _ = try await chat.quickRun(run, skill: b.skill, admin: OsascriptRunner()) { hub.emit($0, $1, phase: "chat") }
+                } catch {
+                    hub.emit("error", "\(error)", phase: "chat")
+                }
+                hub.emit("done", "quick", phase: "chat")
+            }
+            return json(["id": run.id])
+        }
         api.get("graph/skills") { _, _ in json(SkillLibrary.all(try engine().graph)) }
         api.post("graph/skills/:name/:verb") { _, ctx in
             let chat = try engine()

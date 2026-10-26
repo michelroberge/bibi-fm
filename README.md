@@ -89,8 +89,9 @@ bibi diff sec.audit --since 30d
 bibi ui                      # or: bibi sys.health --web
 ```
 
-The web UI starts a server on `127.0.0.1` and opens your browser with a one-time access token in the URL. From there you can:
-- launch any skill from a form
+The web UI starts a server on `127.0.0.1` and opens your browser with a one-time access token in the URL. It opens on **Chat**. From there you can:
+- chat with bibi, or start your most-used skills with one click from **Quick run** on the right. They run inside the chat, so bibi explains their results, and anything they recommend still needs your approval.
+- launch any skill with all its options from **Run**
 - watch its progress live
 - expand the evidence behind each finding and run or copy its diagnostic commands
 - **Approve** or **Skip** each recommendation, preview it, then run the approved ones (optionally as a dry run)

@@ -34,6 +34,9 @@ public struct ChatState: Codable, Sendable {
     /// Learned-skill candidates announced in this chat.
     public var candidates: [String] = []
     public var turns: Int = 0
+    /// Read-only commands that check the findings of the last skill run in this chat (from its diagnostics),
+    /// so a follow-up like "show me those faults" has the right command at hand.
+    public var hints: [String]?
 
     public init(id: String, title: String) { self.id = id; self.title = title }
 }
