@@ -1,6 +1,6 @@
 "use strict";
 // Chat with bibi, and the Skills page. Loaded before app.js; uses its helpers (h, api, token, recommendation,
-// confirmDialog, decisions, currentStream) at call time.
+// confirmDialog, decisionsFor, currentStream) at call time.
 
 const chatUI = { id: "", view: null, lastSeq: 0, draft: "", running: new Set(), quick: [], query: "" };
 
@@ -126,7 +126,7 @@ function chatMessage(m, byFinding) {
 
 function proposal(f) {
   const v = chatUI.view, id = chatUI.id;
-  const dec = (decisions[id] ||= {});
+  const dec = decisionsFor(id);
   const executed = new Set(v.executed);
   if (f.id !== v.state.pending) {
     // Decided or superseded: a record of what was proposed and what happened.
@@ -312,7 +312,7 @@ function followChat(skipOwnMessage) {
 function renderChatBar() {
   const v = chatUI.view, id = chatUI.id;
   if (!v || v.busy) { bar().hidden = true; return; }
-  const dec = decisions[id] || {};
+  const dec = decisionsFor(id);
   const executed = new Set(v.executed);
   const open = (v.report?.findings || []).find((f) => f.id === v.state.pending);
   const valid = new Set((open?.recommendations || []).map((a) => a.id).filter((a) => !executed.has(a)));
@@ -350,7 +350,8 @@ async function decideChat(approve, skip, reason, dryRun) {
   }
   try {
     await api(`chat/${encodeURIComponent(id)}/decide`, { approve, skip, reason: reason || undefined, dryRun, confirmAdmin: admin.length > 0 });
-    for (const k of [...approve, ...skip]) delete decisions[id][k];
+    const dec = decisionsFor(id);
+    for (const k of [...approve, ...skip]) delete dec[k];
     // Show the decision right away: the cards become a record of what is running.
     chatUI.running = new Set(approve);
     v.state.pending = null;

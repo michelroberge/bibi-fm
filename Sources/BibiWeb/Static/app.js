@@ -58,6 +58,14 @@ const app = () => document.getElementById("app");
 const bar = () => document.getElementById("bar");
 
 function errorBox(e) { return h("div", { class: "panel" }, h("strong", {}, "Something went wrong: "), String(e.message || e)); }
+const failBox = (message) => h("div", { class: "result fail" }, message);
+const pill = (text, kind, attrs) => h("span", { class: kind ? "pill " + kind : "pill", ...attrs }, text);
+const runPath = (id, rest) => `runs/${encodeURIComponent(id)}/${rest}`;
+
+// Fills `out` with what `render` returns, or with the error it throws.
+async function fill(out, render) {
+  try { out.replaceChildren(...[await render()].flat()); } catch (e) { out.replaceChildren(failBox(e.message)); }
+}
 
 let catalog = { diagnostics: [], actions: [] };
 let skills = [];
@@ -80,26 +88,27 @@ function confirmDialog(title, bodyNodes, okLabel, danger) {
 document.getElementById("version").addEventListener("click", () => document.getElementById("about").showModal());
 
 // --- router --------------------------------------------------------------------------------------
+// #/<view>/<id> -> [highlighted nav item, page]. Chat is the home page; the skill launcher lives at #/run.
+const routes = new Map([
+  ["chat", ["chat", (id) => showChat(id)]],
+  ["skills", ["skills", () => showSkills()]],
+  ["run", ["home", (id) => id ? showRun(id) : showHome()]],
+  ["history", ["history", () => showHistory()]],
+  ["diff", ["diff", (id) => showDiff(id)]],
+]);
+
 async function route() {
   if (currentStream) { currentStream.close(); currentStream = null; }
   bar().hidden = true;
-  const hash = location.hash.slice(1) || "/";
-  const [, view, id] = hash.split("/");
-  // Chat is the home page; the skill launcher lives at #/run.
-  const section = !view || view === "chat" ? "chat" : view === "run" ? "home" : view;
+  const [, view, id] = (location.hash.slice(1) || "/").split("/");
+  const [section, page] = routes.get(view) || routes.get("chat");
   for (const a of document.querySelectorAll("nav a")) a.classList.toggle("active", a.dataset.nav === section);
   try {
-    if (section === "chat") { await showChat(id ? decodeURIComponent(id) : ""); return; }
-    else if (view === "skills") await showSkills();
-    else if (view === "run" && id) await showRun(decodeURIComponent(id));
-    else if (view === "run") await showHome();
-    else if (view === "history") await showHistory();
-    else if (view === "diff") await showDiff(id ? decodeURIComponent(id) : "");
-    else await showChat("");
+    await page(id ? decodeURIComponent(id) : "");
   } catch (e) {
     app().replaceChildren(errorBox(e));
   }
-  window.scrollTo(0, 0);
+  if (section !== "chat") window.scrollTo(0, 0);
 }
 window.addEventListener("hashchange", route);
 
@@ -118,8 +127,7 @@ async function showHome() {
         renderForm(form, s);
       } },
         h("div", { class: "spread" }, h("h3", {}, s.name),
-          h("span", { class: "row" }, s.usesWeb ? h("span", { class: "pill accent" }, "web") : null,
-            s.adminActions ? h("span", { class: "pill warn" }, "admin") : null)),
+          h("span", { class: "row" }, s.usesWeb ? pill("web", "accent") : null, s.adminActions ? pill("admin", "warn") : null)),
         h("div", { class: "muted small" }, s.help));
       cards.push(card);
       return card;
@@ -130,31 +138,35 @@ async function showHome() {
     ...sections, form);
 }
 
+function paramInput(p) {
+  if (p.kind === "flag") return h("input", { type: "checkbox" });
+  return h("input", { type: p.kind === "int" ? "number" : "text", value: p.defaultValue ?? "",
+    placeholder: p.kind === "list" ? "comma-separated" : (p.metavar || "") });
+}
+
+function paramField(p, input) {
+  const label = h("code", { class: "muted" }, p.flags.at(-1) ?? p.key);
+  if (p.kind === "flag") return h("label", { class: "check" }, input, h("span", {}, p.help), label);
+  return h("label", { class: "field" }, h("span", {}, p.help, " ", label), input);
+}
+
+// The command-line arguments for what the form says; values left at their default are not passed.
+function paramArgv(p, input) {
+  if (p.kind === "flag") return input.checked ? [p.flags.at(-1)] : [];
+  const v = input.value.trim();
+  if (!v || v === (p.defaultValue ?? "")) return [];
+  const values = p.kind === "list" ? v.split(",").map((x) => x.trim()).filter(Boolean) : [v];
+  return values.flatMap((x) => p.flags.length ? [p.flags.at(-1), x] : [x]);
+}
+
 function renderForm(form, s) {
-  const inputs = {};
-  const fields = s.params.map((p) => {
-    const label = p.flags.length ? p.flags[p.flags.length - 1] : p.key;
-    if (p.kind === "flag") {
-      inputs[p.key] = h("input", { type: "checkbox" });
-      return h("label", { class: "check" }, inputs[p.key], h("span", {}, p.help), h("code", { class: "muted" }, label));
-    }
-    inputs[p.key] = h("input", { type: p.kind === "int" ? "number" : "text", value: p.defaultValue ?? "",
-      placeholder: p.kind === "list" ? "comma-separated" : (p.metavar || "") });
-    return h("label", { class: "field" }, h("span", {}, `${p.help}`, " ", h("code", { class: "muted" }, label)), inputs[p.key]);
-  });
+  const inputs = s.params.map(paramInput);
+  const fields = s.params.map((p, i) => paramField(p, inputs[i]));
   const online = h("input", { type: "checkbox", checked: s.onlineByDefault });
   const verbose = h("input", { type: "checkbox" });
   const err = h("div", { class: "small", style: "color: var(--bad)" });
   const go = h("button", { class: "primary", type: "button", onclick: async () => {
-    const argv = [];
-    for (const p of s.params) {
-      const el = inputs[p.key];
-      if (p.kind === "flag") { if (el.checked) argv.push(p.flags[p.flags.length - 1]); continue; }
-      const v = el.value.trim();
-      if (!v || v === (p.defaultValue ?? "")) continue;
-      const values = p.kind === "list" ? v.split(",").map((x) => x.trim()).filter(Boolean) : [v];
-      for (const x of values) p.flags.length ? argv.push(p.flags[p.flags.length - 1], x) : argv.push(x);
-    }
+    const argv = s.params.flatMap((p, i) => paramArgv(p, inputs[i]));
     go.disabled = true;
     try {
       const r = await api("runs", { skill: s.name, argv, online: online.checked, verbose: verbose.checked });
@@ -175,111 +187,141 @@ function renderForm(form, s) {
 }
 
 // --- run view ------------------------------------------------------------------------------------
-const decisions = {};  // runId -> { actionId: "approve" | "skip" }
+// A Map and prototype-less objects, so a run or action id like "__proto__" can never reach Object.prototype.
+const decisions = new Map();  // runId -> { actionId: "approve" | "skip" }
+function decisionsFor(id) {
+  if (!decisions.has(id)) decisions.set(id, Object.create(null));
+  return decisions.get(id);
+}
 
 async function showRun(id) {
   const view = await api("runs/" + encodeURIComponent(id));
+  const running = !view.report || view.busy || (!view.meta.finished && !view.meta.error);
   const log = h("div", { class: "log" });
-  const status = h("span", { class: "row" });
   const body = h("div", {});
   app().replaceChildren(
     h("div", { class: "spread" },
       h("div", {}, h("h1", {}, view.meta.skill), h("div", { class: "muted small mono" }, view.meta.args.join(" ") || "(default options)")),
-      status),
+      h("span", { class: "row" }, runStatus(view, running))),
     h("details", { open: !view.report || !!view.busy }, h("summary", {}, "Activity log"), log),
     body);
 
   let lastSeq = 0;
-  const running = () => !view.report || view.busy || (!view.meta.finished && !view.meta.error);
-  const setStatus = (busy) => status.replaceChildren(busy
-    ? h("span", { class: "row muted" }, h("span", { class: "spinner" }), "working")
-    : view.meta.error ? h("span", { class: "pill bad" }, "failed")
-    : h("span", { class: "pill ok" }, "done"),
-    h("span", { class: "pill" }, view.meta.online ? "online" : "offline"),
-    h("span", { class: "muted small" }, when(view.meta.started)));
-  setStatus(running());
-
   const subscribe = () => {
     if (currentStream) currentStream.close();
-    const es = new EventSource(`/api/runs/${encodeURIComponent(id)}/events?from=${lastSeq}&token=${encodeURIComponent(token())}`);
+    const es = new EventSource(`/api/${runPath(id, "events")}?from=${lastSeq}&token=${encodeURIComponent(token())}`);
     currentStream = es;
-    es.onmessage = async (m) => {
+    es.onmessage = (m) => {
       const e = JSON.parse(m.data);
       lastSeq = e.seq;
-      if (e.type === "done") {
-        es.close();
-        currentStream = null;
-        if (e.phase === "run") return showRun(id);
-        return;
-      }
-      const last = log.lastElementChild;
-      if (e.type === "progress" && last && last.classList.contains("progress")) last.remove();
-      log.append(h("div", { class: e.type }, e.text));
-      log.scrollTop = log.scrollHeight;
+      if (e.type !== "done") return appendLog(log, e);
+      es.close();
+      currentStream = null;
+      if (e.phase === "run") showRun(id);
     };
   };
-  if (running()) { subscribe(); if (!view.report) { body.replaceChildren(h("p", { class: "muted" }, "Collecting evidence and asking the model. This usually takes a minute.")); return; } }
-  else log.append(h("div", { class: "muted" }, "Finished. Live output is only kept while bibi is running; the saved report is below."));
 
+  if (!running) {
+    log.append(h("div", { class: "muted" }, "Finished. Live output is only kept while bibi is running; the saved report is below."));
+  } else {
+    subscribe();
+    if (!view.report) { body.replaceChildren(h("p", { class: "muted" }, "Collecting evidence and asking the model. This usually takes a minute.")); return; }
+  }
   renderReport(view, body, id, subscribe);
+}
+
+function runStatus(view, busy) {
+  const state = busy ? h("span", { class: "row muted" }, h("span", { class: "spinner" }), "working")
+    : view.meta.error ? pill("failed", "bad") : pill("done", "ok");
+  return [state, pill(view.meta.online ? "online" : "offline"), h("span", { class: "muted small" }, when(view.meta.started))];
+}
+
+// Consecutive progress lines replace each other; everything else is kept.
+function appendLog(log, e) {
+  const last = log.lastElementChild;
+  if (e.type === "progress" && last?.classList.contains("progress")) last.remove();
+  log.append(h("div", { class: e.type }, e.text));
+  log.scrollTop = log.scrollHeight;
 }
 
 function renderReport(view, body, id, subscribe) {
   const r = view.report;
   if (!r) { body.replaceChildren(h("div", { class: "panel" }, view.meta.error ? "This run failed: " + view.meta.error : "No report.")); return; }
-  const dec = (decisions[id] ||= {});
-  const obsById = Object.fromEntries(r.observations.map((o) => [o.id, o]));
-  const executed = new Set(view.journal.filter((j) => j.event === "executed").map((j) => j.actionID));
+  const ctx = {
+    view, id, subscribe,
+    dec: decisionsFor(id),
+    obsById: Object.fromEntries(r.observations.map((o) => [o.id, o])),
+    executed: new Set(view.journal.filter((j) => j.event === "executed").map((j) => j.actionID)),
+  };
+  body.replaceChildren(
+    summaryPanel(r),
+    ...diffSection(r.diff, view.meta.skill),
+    ...hypothesesSection(r.hypotheses, ctx.obsById),
+    ...findingsSection(r.findings, ctx),
+    ...journalSection(ctx),
+    auditDetails(view));
+  renderBar(view, id, ctx.dec, subscribe);
+}
 
-  const parts = [h("div", { class: "panel" }, h("pre", { style: "background:none;padding:0;margin:0;font:inherit" }, r.summary.trim()),
-    ...(r.notes || []).map((n) => h("div", { class: "muted small" }, "note: " + n)))];
+function summaryPanel(r) {
+  return h("div", { class: "panel" }, h("pre", { style: "background:none;padding:0;margin:0;font:inherit" }, r.summary.trim()),
+    (r.notes || []).map((n) => h("div", { class: "muted small" }, "note: " + n)));
+}
 
-  if (r.diff) {
-    const ch = r.diff.changes;
-    parts.push(h("h2", {}, `Changes since ${when(r.diff.baselineDate)}`),
-      h("div", { class: "panel" }, ch.length ? changeList(ch.slice(0, 30)) : h("span", { class: "muted" }, "Nothing changed."),
-        ch.length > 30 ? h("a", { href: "#/diff/" + encodeURIComponent(view.meta.skill) }, `… all ${ch.length} changes`) : null));
-  }
+const DIFF_PREVIEW = 30;
 
-  if (r.hypotheses?.length) {
-    parts.push(h("h2", {}, "Possible connections"),
-      ...r.hypotheses.map((hy) => h("div", { class: "panel" },
-        h("div", { class: "spread" }, h("h3", {}, hy.title), meter(hy.confidence)),
-        h("p", {}, hy.explanation),
-        h("div", { class: "muted small" }, "Links " + hy.findingIDs.join(", "), " · model hypothesis, check before acting"),
-        evidence(hy.observationIDs, obsById))));
-  }
+function diffSection(diff, skill) {
+  if (!diff) return [];
+  const ch = diff.changes;
+  return [h("h2", {}, `Changes since ${when(diff.baselineDate)}`),
+    h("div", { class: "panel" }, ch.length ? changeList(ch.slice(0, DIFF_PREVIEW)) : h("span", { class: "muted" }, "Nothing changed."),
+      ch.length > DIFF_PREVIEW ? h("a", { href: "#/diff/" + encodeURIComponent(skill) }, `… all ${ch.length} changes`) : null)];
+}
 
-  const order = ["high", "medium", "low", "info"];
-  const findings = [...r.findings].sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity));
-  parts.push(h("h2", {}, `Findings (${findings.length})`));
-  if (!findings.length) parts.push(h("div", { class: "panel muted" }, "Nothing to report."));
-  for (const f of findings) parts.push(findingCard(f, view, id, dec, obsById, executed, subscribe));
+function hypothesesSection(hypotheses, obsById) {
+  if (!hypotheses?.length) return [];
+  return [h("h2", {}, "Possible connections"),
+    ...hypotheses.map((hy) => h("div", { class: "panel" },
+      h("div", { class: "spread" }, h("h3", {}, hy.title), meter(hy.confidence)),
+      h("p", {}, hy.explanation),
+      h("div", { class: "muted small" }, "Links " + hy.findingIDs.join(", "), " · model hypothesis, check before acting"),
+      evidence(hy.observationIDs, obsById)))];
+}
 
-  const done = view.journal.filter((j) => ["executed", "failed", "undone", "undo-failed", "dry-run"].includes(j.event));
-  if (done.length) {
-    parts.push(h("h2", {}, "What was done"), h("div", { class: "panel" },
-      h("table", {}, h("tr", {}, h("th", {}, "When"), h("th", {}, "What"), h("th", {}, "Result"), h("th", {}, "From")),
-        done.map((j) => h("tr", {}, h("td", { class: "small" }, when(j.time)),
-          h("td", {}, j.title || j.call?.spec, " ", h("span", { class: "pill" + (j.event === "failed" || j.event === "undo-failed" ? " bad" : j.event === "undone" ? " warn" : "") }, j.event)),
-          h("td", { class: "small" }, j.error || j.message || ""), h("td", { class: "small muted" }, j.frontend || "")))),
-      view.undoable.length ? h("div", { class: "row", style: "margin-top: 12px" },
-        h("button", { onclick: () => undo(view, id, subscribe) }, `Undo ${view.undoable.length} action(s)`),
-        view.undoNeedsAdmin ? h("span", { class: "pill warn" }, "asks for your password") : null) : null));
-  }
+const SEVERITY_ORDER = ["high", "medium", "low", "info"];
 
-  parts.push(h("details", {}, h("summary", {}, `Audit: ${view.modelCalls} model call(s), ${view.network.length} network request(s), run ${view.meta.id}`),
-    view.network.length ? h("table", {}, view.network.map((n) => h("tr", {}, h("td", { class: "small" }, n.method),
+function findingsSection(findings, ctx) {
+  const sorted = [...findings].sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity));
+  return [h("h2", {}, `Findings (${sorted.length})`),
+    ...(sorted.length ? sorted.map((f) => findingCard(f, ctx)) : [h("div", { class: "panel muted" }, "Nothing to report.")])];
+}
+
+const JOURNAL_DONE = new Set(["executed", "failed", "undone", "undo-failed", "dry-run"]);
+const JOURNAL_PILL = { failed: "bad", "undo-failed": "bad", undone: "warn" };
+
+function journalSection({ view, id, subscribe }) {
+  const done = view.journal.filter((j) => JOURNAL_DONE.has(j.event));
+  if (!done.length) return [];
+  return [h("h2", {}, "What was done"), h("div", { class: "panel" },
+    h("table", {}, h("tr", {}, h("th", {}, "When"), h("th", {}, "What"), h("th", {}, "Result"), h("th", {}, "From")),
+      done.map((j) => h("tr", {}, h("td", { class: "small" }, when(j.time)),
+        h("td", {}, j.title || j.call?.spec, " ", pill(j.event, JOURNAL_PILL[j.event])),
+        h("td", { class: "small" }, j.error || j.message || ""), h("td", { class: "small muted" }, j.frontend || "")))),
+    view.undoable.length ? h("div", { class: "row", style: "margin-top: 12px" },
+      h("button", { onclick: () => undo(view, id, subscribe) }, `Undo ${view.undoable.length} action(s)`),
+      view.undoNeedsAdmin ? pill("asks for your password", "warn") : null) : null)];
+}
+
+function auditDetails(view) {
+  const net = view.network;
+  return h("details", {}, h("summary", {}, `Audit: ${view.modelCalls} model call(s), ${net.length} network request(s), run ${view.meta.id}`),
+    net.length ? h("table", {}, net.map((n) => h("tr", {}, h("td", { class: "small" }, n.method),
       h("td", { class: "small mono" }, n.url), h("td", { class: "small" }, n.error || n.status || ""), h("td", { class: "small muted" }, n.sent || ""))))
-      : h("p", { class: "muted small" }, view.meta.online ? "No network requests." : "Offline run: nothing left this Mac.")));
-
-  body.replaceChildren(...parts);
-  renderBar(view, id, dec, subscribe);
+      : h("p", { class: "muted small" }, view.meta.online ? "No network requests." : "Offline run: nothing left this Mac."));
 }
 
 function changeList(changes) {
-  return h("div", {}, changes.map((c) => h("div", { class: "change-" + c.kind },
-    c.kind === "added" ? "+ " : c.kind === "removed" ? "− " : "~ ", changeText(c))));
+  return h("div", {}, changes.map((c) => h("div", { class: "change-" + c.kind }, c.kind === "added" ? "+ " : c.kind === "removed" ? "− " : "~ ", changeText(c))));
 }
 function show(v) {
   if (v === null || v === undefined) return "nothing";
@@ -289,8 +331,8 @@ function show(v) {
 }
 function changeText(c) {
   const item = c.item ? " " + c.item : "";
-  if (c.kind === "added") return `${c.key}:${item} is new${c.to !== undefined && c.to !== null ? ` (${show(c.to)})` : ""}`;
-  if (c.kind === "removed") return `${c.key}:${item} is gone${c.from !== undefined && c.from !== null ? ` (was ${show(c.from)})` : ""}`;
+  if (c.kind === "added") return `${c.key}:${item} is new${c.to != null ? ` (${show(c.to)})` : ""}`;
+  if (c.kind === "removed") return `${c.key}:${item} is gone${c.from != null ? ` (was ${show(c.from)})` : ""}`;
   return `${c.key}:${item} changed from ${show(c.from)} to ${show(c.to)}`;
 }
 
@@ -306,18 +348,19 @@ function evidence(ids, obsById) {
       o.text.length > 300 ? h("pre", {}, o.text) : h("span", {}, o.text), h("span", { class: "src" }, o.source))));
 }
 
-function findingCard(f, view, id, dec, obsById, executed, subscribe) {
-  const uncertaintyClass = { low: "ok", medium: "warn", high: "bad" }[f.uncertainty];
+const UNCERTAINTY_PILL = { low: "ok", medium: "warn", high: "bad" };
+
+function findingCard(f, { view, id, dec, obsById, executed }) {
   const diags = f.diagnostics.map((d) => catalog.diagnostics.find((x) => x.id === d)).filter(Boolean);
   return h("div", { class: `panel finding ${f.severity}` },
     h("div", { class: "spread" },
-      h("div", { class: "row" }, h("span", { class: "pill sev-" + f.severity }, f.severity), h("h3", {}, f.title)),
-      h("div", { class: "row" }, meter(f.confidence), h("span", { class: "pill " + uncertaintyClass, title: "how uncertain this finding is" }, `${f.uncertainty} uncertainty`),
-        h("span", { class: "pill", title: "who wrote the explanation" }, f.explainedBy === "model" ? "explained by fm" : "rule"))),
+      h("div", { class: "row" }, pill(f.severity, "sev-" + f.severity), h("h3", {}, f.title)),
+      h("div", { class: "row" }, meter(f.confidence),
+        pill(`${f.uncertainty} uncertainty`, UNCERTAINTY_PILL[f.uncertainty], { title: "how uncertain this finding is" }),
+        pill(f.explainedBy === "model" ? "explained by fm" : "rule", null, { title: "who wrote the explanation" }))),
     h("p", {}, f.explanation),
     evidence(f.observationIDs, obsById),
-    diags.length ? h("div", { class: "small" }, h("div", { class: "muted" }, "To check:"),
-      diags.map((d) => diagnosticRow(d, f, view, id, subscribe))) : null,
+    diags.length ? h("div", { class: "small" }, h("div", { class: "muted" }, "To check:"), diags.map((d) => diagnosticRow(d, f, id))) : null,
     f.recommendations.map((a) => recommendation(a, view, id, dec, executed)));
 }
 
@@ -327,96 +370,123 @@ function fillTemplate(d, subject) {
   return { cmd: (d.admin ? "sudo " : "") + argv.map((a) => /^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, "'\\''")}'`).join(" "), runnable: ok };
 }
 
-function diagnosticRow(d, f, view, id, subscribe) {
+function diagnosticRow(d, f, id) {
   const { cmd, runnable } = fillTemplate(d, f.subject || {});
   const out = h("div", {});
+  const run = async (ev) => {
+    if (d.admin && !(await confirmDialog("Run with administrator rights?", [h("p", {}, d.title), h("pre", {}, cmd),
+      h("p", { class: "muted small" }, "macOS will ask for your password. bibi never sees it.")], "Run"))) return;
+    ev.target.disabled = true;
+    out.replaceChildren(h("span", { class: "spinner" }));
+    await fill(out, async () => (await api(runPath(id, "diagnostic"), { finding: f.id, diagnostic: d.id, confirmAdmin: d.admin }))
+      .map((x) => x.ok ? h("pre", {}, x.output || x.message) : failBox(x.message)));
+    ev.target.disabled = false;
+  };
   return h("div", {},
     h("div", { class: "row" }, h("code", {}, cmd),
       h("button", { class: "small", onclick: () => navigator.clipboard?.writeText(cmd) }, "Copy"),
-      runnable ? h("button", { class: "small", onclick: async (ev) => {
-        if (d.admin && !(await confirmDialog("Run with administrator rights?", [h("p", {}, d.title), h("pre", {}, cmd),
-          h("p", { class: "muted small" }, "macOS will ask for your password. bibi never sees it.")], "Run"))) return;
-        ev.target.disabled = true;
-        out.replaceChildren(h("span", { class: "spinner" }));
-        try {
-          const res = await api(`runs/${encodeURIComponent(id)}/diagnostic`, { finding: f.id, diagnostic: d.id, confirmAdmin: d.admin });
-          out.replaceChildren(...res.map((x) => x.ok ? h("pre", {}, x.output || x.message) : h("div", { class: "result fail" }, x.message)));
-        } catch (e) { out.replaceChildren(h("div", { class: "result fail" }, e.message)); }
-        ev.target.disabled = false;
-      } }, "Run") : null,
+      runnable ? h("button", { class: "small", onclick: run }, "Run") : null,
       h("span", { class: "muted small" }, d.title)),
     out);
 }
 
+const DECISION_CLASS = { approve: "approved", skip: "skipped" };
+
+// Also used by chat.js, which passes its own rerender.
 function recommendation(a, view, id, dec, executed, rerender = route) {
-  const info = view.actionInfo[a.id] || {};
-  const state = dec[a.id];
+  const done = executed.has(a.id);
   const preview = h("div", {});
-  const seg = h("span", { class: "seg" },
-    h("button", { class: state === "approve" ? "on" : "", onclick: () => { dec[a.id] = state === "approve" ? undefined : "approve"; rerender(); } }, "Approve"),
-    h("button", { class: state === "skip" ? "on skip" : "", onclick: () => { dec[a.id] = state === "skip" ? undefined : "skip"; rerender(); } }, "Skip"));
-  return h("div", { class: "rec " + (state === "approve" ? "approved" : state === "skip" ? "skipped" : "") },
+  const showPreview = () => fill(preview, async () => {
+    const p = (await api(runPath(id, "preview"), { actions: [a.id] }))[a.id];
+    return p.error ? failBox("Cannot run: " + p.error) : h("ul", { class: "small" }, p.steps.map((s) => h("li", {}, s)));
+  });
+  return h("div", { class: "rec " + (DECISION_CLASS[dec[a.id]] || "") },
     h("div", { class: "spread" },
-      h("div", {}, h("strong", {}, a.title), executed.has(a.id) ? h("span", { class: "pill ok", style: "margin-left:8px" }, "done") : null),
-      executed.has(a.id) ? null : seg),
-    h("div", { class: "row small", style: "margin: 4px 0" },
-      a.bytes ? h("span", { class: "pill accent" }, human(a.bytes)) : null,
-      h("span", { class: "pill" }, `safety ${a.safety}/10`),
-      h("span", { class: "pill" }, `confidence ${a.confidence}/10`),
-      info.reversible ? h("span", { class: "pill ok" }, "undoable") : h("span", { class: "pill" }, "not undoable"),
-      info.privilege === "admin" ? h("span", { class: "pill warn" }, "password required") : null),
+      h("div", {}, h("strong", {}, a.title), done ? pill("done", "ok", { style: "margin-left:8px" }) : null),
+      done ? null : decisionButtons(a.id, dec, rerender)),
+    actionPills(a, view.actionInfo[a.id] || {}),
     h("div", { class: "small" }, a.reason),
     h("div", { class: "row small", style: "margin-top: 4px" }, h("code", { class: "muted" }, a.command),
-      h("button", { class: "small", onclick: async () => {
-        try {
-          const p = (await api(`runs/${encodeURIComponent(id)}/preview`, { actions: [a.id] }))[a.id];
-          preview.replaceChildren(p.error ? h("div", { class: "result fail" }, "Cannot run: " + p.error)
-            : h("ul", { class: "small" }, p.steps.map((s) => h("li", {}, s))));
-        } catch (e) { preview.replaceChildren(h("div", { class: "result fail" }, e.message)); }
-      } }, "Preview")),
+      h("button", { class: "small", onclick: showPreview }, "Preview")),
     preview);
+}
+
+// Approve / Skip; clicking the chosen one again clears it.
+function decisionButtons(actionId, dec, rerender) {
+  const state = dec[actionId];
+  const toggle = (choice) => () => { dec[actionId] = state === choice ? undefined : choice; rerender(); };
+  return h("span", { class: "seg" },
+    h("button", { class: state === "approve" ? "on" : "", onclick: toggle("approve") }, "Approve"),
+    h("button", { class: state === "skip" ? "on skip" : "", onclick: toggle("skip") }, "Skip"));
+}
+
+function actionPills(a, info) {
+  return h("div", { class: "row small", style: "margin: 4px 0" },
+    a.bytes ? pill(human(a.bytes), "accent") : null,
+    pill(`safety ${a.safety}/10`),
+    pill(`confidence ${a.confidence}/10`),
+    info.reversible ? pill("undoable", "ok") : pill("not undoable"),
+    info.privilege === "admin" ? pill("password required", "warn") : null);
 }
 
 function renderBar(view, id, dec, subscribe) {
   const approved = Object.entries(dec).filter(([, v]) => v === "approve").map(([k]) => k);
   if (!approved.length) { bar().hidden = true; return; }
   const dry = h("input", { type: "checkbox" });
+  const runLabel = () => dry.checked ? "Dry run" : "Run approved";
+  const run = h("button", { class: "primary", onclick: () => execute(view, id, approved, dry.checked, subscribe) }, runLabel());
+  dry.addEventListener("change", () => run.textContent = runLabel());
   bar().hidden = false;
   bar().replaceChildren(
     h("strong", {}, `${approved.length} approved`),
     h("label", { class: "check" }, dry, "Dry run (show what would happen)"),
     h("button", { onclick: () => { for (const k of approved) delete dec[k]; route(); } }, "Clear"),
-    h("button", { class: "primary", onclick: () => execute(view, id, approved, dry.checked, subscribe) }, dry.checked ? "Dry run" : "Run approved"));
-  dry.addEventListener("change", () => bar().lastElementChild.textContent = dry.checked ? "Dry run" : "Run approved");
+    run);
 }
 
 async function execute(view, id, ids, dryRun, subscribe) {
-  const chosen = ids.map((i) => view.report.findings.flatMap((f) => f.recommendations).find((a) => a.id === i)).filter(Boolean);
+  const all = view.report.findings.flatMap((f) => f.recommendations);
+  const chosen = ids.map((i) => all.find((a) => a.id === i)).filter(Boolean);
   const admin = chosen.filter((a) => view.actionInfo[a.id]?.privilege === "admin");
   const irreversible = chosen.filter((a) => !view.actionInfo[a.id]?.reversible);
   let previews = {};
-  try { previews = await api(`runs/${encodeURIComponent(id)}/preview`, { actions: ids }); } catch (_) {}
-  const list = h("ul", {}, chosen.map((a) => h("li", {}, a.title,
-    previews[a.id]?.error ? h("div", { class: "small", style: "color: var(--bad)" }, "will fail: " + previews[a.id].error)
-      : h("div", { class: "small muted" }, (previews[a.id]?.steps || []).join("; ")))));
-  const notes = [];
-  if (!dryRun && irreversible.length) notes.push(h("p", { class: "small" }, `${irreversible.length} of these cannot be undone.`));
-  if (!dryRun && admin.length) notes.push(h("p", { class: "small" }, h("strong", {}, `${admin.length} need administrator rights. `),
-    "macOS will show its own password dialog for each one; bibi and this page never see your password."));
-  if (!(await confirmDialog(dryRun ? "Dry run these actions?" : "Run these actions?", [list, ...notes], dryRun ? "Dry run" : "Run", !dryRun && irreversible.length > 0))) return;
+  try { previews = await api(runPath(id, "preview"), { actions: ids }); } catch (_) {}
+  const notes = dryRun ? [] : riskNotes(irreversible.length, admin.length);
+  const [title, okLabel] = dryRun ? ["Dry run these actions?", "Dry run"] : ["Run these actions?", "Run"];
+  if (!(await confirmDialog(title, [previewList(chosen, previews), ...notes], okLabel, !dryRun && irreversible.length > 0))) return;
   bar().hidden = true;
   subscribe();
-  const decs = decisions[id];
   try {
-    const results = await api(`runs/${encodeURIComponent(id)}/execute`, { actions: ids, dryRun, confirmAdmin: admin.length > 0 });
-    for (const k of ids) delete decs[k];
+    const results = await api(runPath(id, "execute"), { actions: ids, dryRun, confirmAdmin: admin.length > 0 });
+    const dec = decisionsFor(id);
+    for (const k of ids) delete dec[k];
     await showRun(id);
-    app().prepend(h("div", { class: "panel" }, h("h3", {}, dryRun ? "Dry run" : "Results"),
-      results.map((r) => h("div", { class: "result " + (r.ok ? "ok" : "fail") }, h("strong", {}, r.title), " — ", r.message,
-        r.output ? h("pre", {}, r.output) : null))));
+    app().prepend(resultsPanel(dryRun ? "Dry run" : "Results", results));
   } catch (e) {
     app().prepend(errorBox(e));
   }
+}
+
+function previewList(actions, previews) {
+  return h("ul", {}, actions.map((a) => {
+    const p = previews[a.id];
+    return h("li", {}, a.title, p?.error ? h("div", { class: "small", style: "color: var(--bad)" }, "will fail: " + p.error)
+      : h("div", { class: "small muted" }, (p?.steps || []).join("; ")));
+  }));
+}
+
+function riskNotes(irreversible, admin) {
+  return [
+    irreversible ? h("p", { class: "small" }, `${irreversible} of these cannot be undone.`) : null,
+    admin ? h("p", { class: "small" }, h("strong", {}, `${admin} need administrator rights. `),
+      "macOS will show its own password dialog for each one; bibi and this page never see your password.") : null,
+  ].filter(Boolean);
+}
+
+function resultsPanel(title, results) {
+  return h("div", { class: "panel" }, h("h3", {}, title),
+    results.map((r) => h("div", { class: "result " + (r.ok ? "ok" : "fail") }, h("strong", {}, r.title), " — ", r.message,
+      r.output ? h("pre", {}, r.output) : null)));
 }
 
 async function undo(view, id, subscribe) {
@@ -426,10 +496,9 @@ async function undo(view, id, subscribe) {
   if (!ok) return;
   subscribe();
   try {
-    const results = await api(`runs/${encodeURIComponent(id)}/undo`, { confirmAdmin: view.undoNeedsAdmin });
+    const results = await api(runPath(id, "undo"), { confirmAdmin: view.undoNeedsAdmin });
     await showRun(id);
-    app().prepend(h("div", { class: "panel" }, h("h3", {}, "Undo"),
-      results.map((r) => h("div", { class: "result " + (r.ok ? "ok" : "fail") }, r.title, " — ", r.message))));
+    app().prepend(resultsPanel("Undo", results));
   } catch (e) { app().prepend(errorBox(e)); }
 }
 
@@ -470,13 +539,17 @@ function historyTable(page, reload) {
       h("button", { class: "small", disabled: last >= page.total, onclick: () => go(page.offset + page.limit) }, "Older ›")));
   return h("div", { class: "panel" }, h("table", {},
     h("tr", {}, h("th", {}, "When"), h("th", {}, "Command"), h("th", {}, "Result"), h("th", {}, "Options")),
-    page.items.map((r) => h("tr", { class: "click", onclick: () => location.hash = "#/run/" + encodeURIComponent(r.meta.id) },
-      h("td", { class: "small" }, when(r.meta.started)),
-      h("td", {}, r.meta.skill),
-      h("td", { class: "small" }, r.meta.error ? h("span", { class: "pill bad" }, "failed")
-        : r.meta.finished ? `${r.meta.findings ?? 0} findings` : h("span", { class: "pill" }, "running"),
-        r.undoable ? h("span", { class: "pill warn", style: "margin-left:6px" }, `${r.undoable} undoable`) : null),
-      h("td", { class: "small mono muted" }, r.meta.args.join(" "))))), pager);
+    page.items.map(historyRow)), pager);
+}
+
+function historyRow(r) {
+  const { meta } = r;
+  const result = meta.error ? pill("failed", "bad") : meta.finished ? `${meta.findings ?? 0} findings` : pill("running");
+  return h("tr", { class: "click", onclick: () => location.hash = "#/run/" + encodeURIComponent(meta.id) },
+    h("td", { class: "small" }, when(meta.started)),
+    h("td", {}, meta.skill),
+    h("td", { class: "small" }, result, r.undoable ? pill(`${r.undoable} undoable`, "warn", { style: "margin-left:6px" }) : null),
+    h("td", { class: "small mono muted" }, meta.args.join(" ")));
 }
 
 // --- changes (baseline diff) ---------------------------------------------------------------------
@@ -488,13 +561,7 @@ async function showDiff(skill) {
     if (!select.value) { out.replaceChildren(); return; }
     out.replaceChildren(h("span", { class: "spinner" }));
     try {
-      const d = await api(`diff?skill=${encodeURIComponent(select.value)}&since=${encodeURIComponent(since.value)}`);
-      if (!d.latest) out.replaceChildren(h("div", { class: "empty" }, "No runs of this command yet."));
-      else if (!d.baseline) out.replaceChildren(h("div", { class: "empty" }, "Only one comparable run so far. Run it again later to see what changed."));
-      else out.replaceChildren(h("div", { class: "panel" },
-        h("div", { class: "muted small" }, h("a", { href: "#/run/" + d.latest.id }, `Latest run (${when(d.latest.started)})`), " compared with ",
-          h("a", { href: "#/run/" + d.baseline.id }, when(d.baseline.started))),
-        d.changes.length ? changeList(d.changes) : h("p", {}, "Nothing changed.")));
+      out.replaceChildren(diffResult(await api(`diff?skill=${encodeURIComponent(select.value)}&since=${encodeURIComponent(since.value)}`)));
     } catch (e) { out.replaceChildren(errorBox(e)); }
   };
   select.addEventListener("change", load);
@@ -503,6 +570,15 @@ async function showDiff(skill) {
     h("p", { class: "muted" }, "Compare the latest run of a command with an earlier one: new listeners, login items, apps, resource use…"),
     h("div", { class: "row" }, select, since), out);
   load();
+}
+
+function diffResult(d) {
+  if (!d.latest) return h("div", { class: "empty" }, "No runs of this command yet.");
+  if (!d.baseline) return h("div", { class: "empty" }, "Only one comparable run so far. Run it again later to see what changed.");
+  return h("div", { class: "panel" },
+    h("div", { class: "muted small" }, h("a", { href: "#/run/" + d.latest.id }, `Latest run (${when(d.latest.started)})`), " compared with ",
+      h("a", { href: "#/run/" + d.baseline.id }, when(d.baseline.started))),
+    d.changes.length ? changeList(d.changes) : h("p", {}, "Nothing changed."));
 }
 
 // --- theme: auto (device setting), light or dark; the choice is kept per browser --------------------
