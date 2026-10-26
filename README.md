@@ -150,6 +150,8 @@ Built in (fixed scripts and Apple frameworks, so they behave the same every time
 | `facetime_call` | FaceTime audio or video, or a phone call through your iPhone (`via=`) | outbound | — |
 | `message_send` | Messages (iMessage) | outbound | — |
 
+- **Only people you named.** Every recipient must appear in the conversation: a name or address the model made up is refused.
+- **Missing pieces are filled in or asked for.** If a step is refused (no text for the email, a name that matches two people), the model gets the reasons and fixes what your request already answers, such as writing the email from "tell him to look at the repo". If only you know the answer, bibi asks one question and keeps the unfinished step, so your reply completes it.
 - **Names become exact addresses before you approve.** "Marie" is looked up in Contacts. The card shows `Marie Dupont <marie@example.com>`, or bibi says the name matches several people (or a person has several addresses) and asks which one.
 - **Dates become exact times when proposed.** "tomorrow 3pm" is shown as `2026-10-27 15:00`, so the card says exactly what will be created.
 - **Outbound steps show everything.** The card and the confirmation dialog show the recipients and the full text, and say it can't be taken back.
@@ -162,7 +164,9 @@ Built in (fixed scripts and Apple frameworks, so they behave the same every time
 - Something bibi created with `make` can be undone when the app gives it an id (Reminders, Notes…).
 - New Outlook ignores the scripting dictionary it still ships, so bibi leaves it out; add your accounts to Mail.app to send from them.
 
-**Permissions.** macOS asks once for each: Calendars, Reminders, Contacts, and Automation for each app bibi controls. Run `bibi apps permissions` to answer the dialogs up front. They're granted to the app bibi runs from (Terminal, iTerm, VS Code…) and can be changed in System Settings > Privacy & Security.
+**Permissions.** macOS asks once for each: Calendars, Reminders, Contacts, and Automation for each app bibi controls. Run `bibi apps permissions` to answer the dialogs up front; you can change them later in System Settings > Privacy & Security.
+
+macOS normally charges a permission to the app a program was started from (Terminal, VS Code…), and those apps carry no Contacts or Calendars text, so macOS would refuse without asking. `bibi ui` and `bibi apps` therefore relaunch themselves as their own "responsible process": macOS asks on behalf of **bibi** and remembers the answer for bibi. The binary is ad-hoc signed, so after a rebuild macOS may ask again.
 
 ## How bibi learns skills
 
