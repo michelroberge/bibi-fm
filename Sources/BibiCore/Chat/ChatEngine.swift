@@ -164,15 +164,17 @@ public final class ChatEngine: Sendable {
         }
         state.turns += 1
         state.results = []
+        // The new message supersedes the open proposal, but a card being filled in carries over into this turn.
+        let previous = state.pending
         state.pending = nil
         say(run, &state, ChatMessage("user", question), emit)
-        await think(run, &state, question: question, emit: emit)
+        await think(run, &state, question: question, previous: previous, emit: emit)
         await compact(run, &state)
         save(run, state)
     }
 
     /// One model turn. `question` is nil for the follow-up that answers from results.
-    func think(_ run: RunRecord, _ state: inout ChatState, question: String?, emit: @escaping ChatEmit) async {
+    func think(_ run: RunRecord, _ state: inout ChatState, question: String?, previous: String? = nil, emit: @escaping ChatEmit) async {
         let focus = question ?? state.recent.last(where: { $0.role == "user" })?.text ?? ""
         let v = embedder.vector(focus)
         harness.apps.catalog.refresh(graph: graph)
@@ -186,7 +188,7 @@ public final class ChatEngine: Sendable {
         if question != nil { state.draft = nil }
         // The open proposal's form actions: the model sees their fields, and proposing the same action again changes
         // only the fields it gives ("make the subject shorter"). A message about something else leaves them alone.
-        let open = question == nil ? [] : openForms(run, state)
+        let open = question == nil ? [] : openForms(run, previous)
         let form = open.map(Self.formText).joined(separator: "\n")
         let editing = open.isEmpty || !Self.continues(form, tools: tools.ids) ? [] : open
 
@@ -203,7 +205,7 @@ public final class ChatEngine: Sendable {
         let recent = recentText(state, dropLastUser: question != nil)
         // While the user fills in a card, the card holds what was settled: the messages that led to it would only
         // repeat it less precisely (and use the small context). Grounding below still checks the whole conversation.
-        ctx.add("Recent messages", editing.isEmpty ? recent : recentText(state, dropLastUser: true, since: state.pending), priority: 2,
+        ctx.add("Recent messages", editing.isEmpty ? recent : recentText(state, dropLastUser: true, since: previous), priority: 2,
                 maxChars: 2000)
         ctx.add("Results of the steps the user approved", state.results.joined(separator: "\n\n"), priority: 0, maxChars: 2500)
         ctx.add("Commands that check the latest findings", (state.hints ?? []).joined(separator: "\n"), priority: 1, maxChars: 900)
@@ -320,9 +322,10 @@ public final class ChatEngine: Sendable {
     }
 
     /// The not-yet-run actions with form fields in the proposal waiting for decisions.
-    func openForms(_ run: RunRecord, _ state: ChatState) -> [BoundAction] {
+    func openForms(_ run: RunRecord, _ finding: String?) -> [BoundAction] {
+        guard let finding else { return [] }
         let done = Set(run.journalEntries.filter { $0.event == .executed }.compactMap(\.actionID))
-        return (run.report()?.findings.first { $0.id == state.pending }?.recommendations ?? []).filter {
+        return (run.report()?.findings.first { $0.id == finding }?.recommendations ?? []).filter {
             !done.contains($0.id) && harness.registry.spec($0.call.spec)?.fields.isEmpty == false
         }
     }
