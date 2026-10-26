@@ -14,6 +14,15 @@ public struct RunMeta: Codable, Sendable {
     public var error: String?
 }
 
+extension RunMeta {
+    /// Case-insensitive match on what the History page shows: command, arguments, summary, error and id.
+    public func matches(_ query: String) -> Bool {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return true }
+        return [skill, args.joined(separator: " "), summary ?? "", error ?? "", id].contains { $0.localizedCaseInsensitiveContains(q) }
+    }
+}
+
 public struct JournalEntry: Codable, Sendable {
     public enum Event: String, Codable, Sendable {
         case selected, previewed, dryRun = "dry-run", executed, failed, undone, undoFailed = "undo-failed"
@@ -63,11 +72,11 @@ public final class RunRecord: Sendable {
             change(&m)
             return m
         }
-        try? JSON.prettyEncoder.encode(m).write(to: URL(fileURLWithPath: dir + "/meta.json"))
+        try? JSON.prettyEncoder.encode(m).write(to: URL(fileURLWithPath: dir + "/meta.json"), options: .atomic)
     }
 
     public func save(_ result: SkillResult) {
-        try? JSON.prettyEncoder.encode(result).write(to: URL(fileURLWithPath: dir + "/report.json"))
+        try? JSON.prettyEncoder.encode(result).write(to: URL(fileURLWithPath: dir + "/report.json"), options: .atomic)
         updateMeta {
             $0.finished = $0.finished ?? Date()
             $0.summary = result.summary
@@ -103,7 +112,7 @@ public final class RunRecord: Sendable {
 
     /// Extra per-run files (chat state and transcript).
     public func saveFile(_ file: String, _ value: some Encodable) {
-        try? JSON.prettyEncoder.encode(value).write(to: URL(fileURLWithPath: dir + "/" + file))
+        try? JSON.prettyEncoder.encode(value).write(to: URL(fileURLWithPath: dir + "/" + file), options: .atomic)
     }
     public func loadFile<T: Decodable>(_ file: String, _ type: T.Type) -> T? {
         FileManager.default.contents(atPath: dir + "/" + file).flatMap { try? JSON.decoder.decode(T.self, from: $0) }
@@ -163,6 +172,12 @@ public final class RunStore: Sendable {
         return skills.flatMap { s in
             ((try? FileManager.default.contentsOfDirectory(atPath: root + "/" + s)) ?? []).compactMap { load(root + "/" + s + "/" + $0) }
         }.sorted { $0.meta.started > $1.meta.started }
+    }
+
+    /// Removes a run and everything saved with it (only folders inside this store).
+    public func delete(_ run: RunRecord) throws {
+        guard Paths.isWithin(run.dir, root), run.dir != root else { throw ActionError("\(run.dir) is not a run folder") }
+        try FileManager.default.removeItem(atPath: run.dir)
     }
 
     /// By full id or unique prefix.

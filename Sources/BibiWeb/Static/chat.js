@@ -2,12 +2,13 @@
 // Chat with bibi, and the Skills page. Loaded before app.js; uses its helpers (h, api, token, recommendation,
 // confirmDialog, decisions, currentStream) at call time.
 
-const chatUI = { id: "", view: null, lastSeq: 0, draft: "", running: new Set(), quick: [] };
+const chatUI = { id: "", view: null, lastSeq: 0, draft: "", running: new Set(), quick: [], query: "" };
 
 async function showChat(id) {
   chatUI.id = id;
   chatUI.lastSeq = 0;
-  const [chats, quick] = await Promise.all([api("chats").catch(() => []), api("graph/quick").catch(() => [])]);
+  const [chats, quick] = await Promise.all([api("chats?q=" + encodeURIComponent(chatUI.query || "")).catch(() => []),
+    api("graph/quick").catch(() => [])]);
   chatUI.quick = quick;
   chatUI.view = id ? await api("chat/" + encodeURIComponent(id)) : null;
   renderChat(chats);
@@ -16,15 +17,23 @@ async function showChat(id) {
 
 function renderChat(chats) {
   const v = chatUI.view, id = chatUI.id;
+  const list0 = h("div", { class: "chatlist" });
+  const search = h("input", { type: "search", placeholder: "Search chats", value: chatUI.query || "", "aria-label": "Search chats" });
+  let timer;
+  search.addEventListener("input", () => {
+    chatUI.query = search.value;
+    clearTimeout(timer);
+    timer = setTimeout(async () => fillChatList(list0, await api("chats?q=" + encodeURIComponent(search.value)).catch(() => [])), 200);
+  });
+  fillChatList(list0, chats);
   const side = h("aside", { class: "chats" },
     h("button", { class: "primary", style: "width:100%", onclick: () => { location.hash = "#/chat"; } }, "New chat"),
-    h("div", { class: "chatlist" }, (chats || []).map((c) => h("a", { href: "#/chat/" + encodeURIComponent(c.id), class: c.id === id ? "active" : "" },
-      h("div", {}, c.title), h("div", { class: "muted small" }, when(c.started))))));
+    search, list0);
 
   const list = h("div", { class: "chat", id: "chatlog" });
   if (!v) {
     list.append(h("div", { class: "empty" },
-      h("h2", { style: "margin-top:0" }, "Ask bibi about this Mac"),
+      h("h2", { style: "margin-top:0" }, "Ask bibi about " + (catalog.hostName || "this Mac")),
       h("p", {}, "bibi answers from what it can check. When it needs to look at something or change it, it proposes the exact steps and nothing runs until you approve them."),
       h("div", { class: "row", style: "justify-content:center" }, ["How much free disk space do I have?", "What is using my CPU?", "Which apps start at login?"]
         .map((q) => h("button", { class: "small", onclick: () => sendChat(q) }, q)))));
@@ -59,7 +68,7 @@ function renderChat(chats) {
   input.focus();
 }
 
-// Most-used skills, one click away. A quick run happens in the current chat (or starts one).
+// Most-used skills, one click away: the same run as the Run page's button, with default options.
 function quickPanel() {
   if (!chatUI.quick.length) return h("aside", { class: "quick" });
   return h("aside", { class: "quick" },
@@ -71,16 +80,33 @@ function quickPanel() {
 }
 
 async function quickRun(skill) {
-  if (chatUI.view?.busy) return;
   try {
-    const r = await api("chat/quick", { conversation: chatUI.id || undefined, skill });
-    if (r.id !== chatUI.id) history.replaceState(null, "", "#/chat/" + encodeURIComponent(r.id));
-    chatUI.id = r.id;
-    chatUI.lastSeq = 0;
-    chatUI.view = await api("chat/" + encodeURIComponent(r.id));
-    renderChat(await api("chats"));
-    setBusy(true);
-    followChat();
+    const r = await api("runs", { skill, argv: [] });
+    location.hash = "#/run/" + encodeURIComponent(r.id);
+  } catch (e) {
+    document.getElementById("chatlog")?.append(h("div", { class: "msg note" }, e.message));
+  }
+}
+
+function fillChatList(el, chats) {
+  if (!chats.length) { el.replaceChildren(h("div", { class: "muted small", style: "padding:6px 8px" }, chatUI.query ? "No chat matches." : "No chats yet.")); return; }
+  el.replaceChildren(...chats.map((c) => h("div", { class: "chatitem" + (c.id === chatUI.id ? " active" : "") },
+    h("a", { href: "#/chat/" + encodeURIComponent(c.id) },
+      h("div", { class: "title" }, c.title),
+      c.snippet ? h("div", { class: "muted small snippet" }, c.snippet) : h("div", { class: "muted small" }, when(c.started))),
+    h("button", { class: "small icon", title: "Delete this chat", "aria-label": "Delete " + c.title, onclick: () => deleteChat(c) }, "×"))));
+}
+
+async function deleteChat(c) {
+  const notes = [h("p", {}, c.title),
+    h("p", { class: "small muted" }, "The transcript and its history run are removed. What bibi learned from it (statistics, examples, facts) stays.")];
+  if (c.undoable) notes.push(h("p", { class: "small" }, h("strong", {}, `${c.undoable} action(s) from this chat can still be undone. `),
+    "After deleting, bibi can't undo them any more (trashed files stay in the Trash)."));
+  if (!(await confirmDialog("Delete this chat?", notes, "Delete", true))) return;
+  try {
+    await api("chat/" + encodeURIComponent(c.id), undefined, "DELETE");
+    if (chatUI.id === c.id) { location.hash = "#/chat"; return; }
+    renderChat(await api("chats?q=" + encodeURIComponent(chatUI.query || "")));
   } catch (e) {
     document.getElementById("chatlog")?.append(h("div", { class: "msg note" }, e.message));
   }
@@ -117,7 +143,7 @@ function proposal(f) {
 
 function rerenderChat() {
   const y = window.scrollY;
-  api("chats").then((chats) => { renderChat(chats); window.scrollTo(0, y); });
+  api("chats?q=" + encodeURIComponent(chatUI.query || "")).then((chats) => { renderChat(chats); window.scrollTo(0, y); });
 }
 
 function candidateCard(c) {

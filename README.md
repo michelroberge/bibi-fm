@@ -24,7 +24,7 @@ make install          # release build into ~/.local/libexec/bibi, symlinked as ~
 bibi list
 ```
 
-For development, `./bin/bibi` builds if needed and runs from the repo. Run the tests with `make test` (`swift run bibi-tests`).
+For development, `./bin/bibi` builds if needed and runs from the repo. Run the tests with `make test` (`swift run bibi-tests`). The version lives in `VERSION` and `Sources/BibiCore/Version.swift` (a test checks that they match); change both with `make bump V=x.y.z`.
 
 ## Commands
 
@@ -90,7 +90,7 @@ bibi ui                      # or: bibi sys.health --web
 ```
 
 The web UI starts a server on `127.0.0.1` and opens your browser with a one-time access token in the URL. It opens on **Chat**. From there you can:
-- chat with bibi, or start your most-used skills with one click from **Quick run** on the right. They run inside the chat, so bibi explains their results, and anything they recommend still needs your approval.
+- chat with bibi, or start one of your most-used skills from **Quick run** on the right. It starts the same run as the **Run** page's button, with default options, and opens it.
 - launch any skill with all its options from **Run**
 - watch its progress live
 - expand the evidence behind each finding and run or copy its diagnostic commands
@@ -132,7 +132,7 @@ How commands from chat are checked:
 - **Checked again at run time.** The check runs a second time just before the command does, so a command stored in a report can't skip it.
 - **Only the latest proposal can be approved.** Sending a new message supersedes the open one.
 
-Each chat is saved as a run in History, with the full transcript, every model call, the journal of what ran, and undo. **Details** on a chat opens that run.
+Each chat is saved as a run in History, with the full transcript, every model call, the journal of what ran, and undo. **Details** on a chat opens that run. The chat list can be searched (titles and every message). Deleting a chat removes its transcript and run, but what bibi learned from it (statistics, examples, facts) stays.
 
 ## How bibi learns skills
 

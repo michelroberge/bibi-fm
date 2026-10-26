@@ -102,6 +102,36 @@ public final class ChatEngine: Sendable {
 
     public func conversations() -> [RunRecord] { harness.store.list(skill: "chat") }
 
+    /// Chats whose title or messages contain every word of `query` (case-insensitive), newest first, with a
+    /// snippet of the first matching message.
+    public func search(_ query: String) -> [(run: RunRecord, snippet: String?)] {
+        let words = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !words.isEmpty else { return conversations().map { ($0, nil) } }
+        return conversations().compactMap { r in
+            let texts = [r.meta.summary ?? ""] + transcript(r).map(\.text)
+            let all = texts.joined(separator: "\n").lowercased()
+            guard words.allSatisfy(all.contains) else { return nil }
+            let hit = texts.dropFirst().first { $0.lowercased().contains(words[0]) }
+            return (r, hit.map { Self.snippet($0, around: words[0]) })
+        }
+    }
+
+    static func snippet(_ text: String, around word: String, radius: Int = 50) -> String {
+        let flat = Text.oneLine(text, max: 10_000)
+        guard let r = flat.lowercased().range(of: word) else { return Text.oneLine(flat, max: radius * 2) }
+        let start = flat.index(r.lowerBound, offsetBy: -radius, limitedBy: flat.startIndex) ?? flat.startIndex
+        let end = flat.index(r.upperBound, offsetBy: radius, limitedBy: flat.endIndex) ?? flat.endIndex
+        return (start > flat.startIndex ? "…" : "") + flat[start..<end] + (end < flat.endIndex ? "…" : "")
+    }
+
+    /// Deletes a chat: its run (transcript, report, journal) and its conversation node. What bibi learned from it
+    /// (statistics, example requests, facts) stays.
+    public func delete(_ run: RunRecord) throws {
+        guard run.meta.skill == "chat" else { throw ActionError("\(run.id) is not a chat") }
+        try harness.store.delete(run)
+        graph.delete("conversation:" + run.id)
+    }
+
     public func state(_ run: RunRecord) -> ChatState {
         run.loadFile("chat.json", ChatState.self) ?? ChatState(id: run.id, title: run.meta.summary ?? "Chat")
     }
@@ -363,36 +393,7 @@ public final class ChatEngine: Sendable {
 
     // MARK: decisions
 
-    /// Runs a skill from the chat page's quick-run list: the click is the request and the approval. Skills only
-    /// analyze; anything they recommend comes back as a proposal that needs its own approval.
-    public func quickRun(_ run: RunRecord, skill name: String, admin: any AdminRunner, emit: @escaping ChatEmit) async throws -> [ExecResult] {
-        guard let skill = harness.skill(named: name) else { throw ActionError("there is no skill \(name)") }
-        var state = state(run)
-        if state.turns == 0 {
-            state.title = "Run \(skill.name)"
-            var report = run.report() ?? SkillResult(summary: state.title)
-            report.summary = state.title
-            run.save(report)
-            graph.update("conversation:" + run.id) { $0.name = state.title }
-        }
-        state.turns += 1
-        state.results = []
-        state.intent = nil
-        say(run, &state, ChatMessage("user", "Run \(skill.name)"), emit)
-        let call = ActionCall("run_skill", ["skill": skill.name, "argv": "[]"])
-        let fid = addProposal(run, title: "Run \(skill.name)", explanation: skill.help,
-                              actions: [BoundAction(call, title: "Run \(skill.name)", kind: "skill", target: skill.name, safety: 10,
-                                                    confidence: 10, reason: skill.help, command: "bibi \(skill.name)")])
-        state.pending = fid
-        state.skill = GraphSync.skillID(skill.name)
-        state.guidance = nil
-        graph.record("quick", node: GraphSync.skillID(skill.name), conversation: run.id)
-        save(run, state)
-        let ids = run.report()?.findings.first { $0.id == fid }?.recommendations.map(\.id) ?? []
-        return try await decide(run, ChatDecision(approve: ids), admin: admin, emit: emit)
-    }
-
-    /// Skills for the quick-run list, most used first: runs in history (terminal, web, chat) plus quick runs.
+    /// Skills for the quick-run list on the chat page, most used first (runs in history from any front end).
     public func quickSkills(limit: Int = 6) -> [SkillLibrary.SkillView] {
         var uses: [String: Int] = [:]
         for r in harness.store.list() where r.meta.skill != "chat" { uses[r.meta.skill, default: 0] += 1 }
@@ -400,7 +401,7 @@ public final class ChatEngine: Sendable {
             guard let n = graph.node(GraphSync.skillID(s.name)), n.status == "active", s.params.allSatisfy({ !$0.required }) else { return nil }
             var v = SkillLibrary.view(n, graph: graph)
             v.help = s.help
-            return (v, uses[s.name, default: 0] + v.stats["quick", default: 0])
+            return (v, uses[s.name, default: 0])
         }
         .sorted { ($0.1, $1.0.name) > ($1.1, $0.0.name) }.prefix(limit).map(\.0)
     }

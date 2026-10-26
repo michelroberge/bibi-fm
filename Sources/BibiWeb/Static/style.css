@@ -2,8 +2,9 @@
   --bg: #f7f7f9; --panel: #ffffff; --text: #1b1b22; --muted: #686876; --line: #e3e3ea; --accent: #5b5bd6;
   --accent-soft: #ececfd; --ok: #1f8a4c; --ok-soft: #e4f5ea; --warn: #a15c00; --warn-soft: #fdf0dc;
   --bad: #c42b2b; --bad-soft: #fde7e7; --info: #3b6ea8; --info-soft: #e5eef9; --code: #f0f0f4;
-  --radius: 10px; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius: 10px; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; color-scheme: light dark;
 }
+:root[data-theme="light"] { color-scheme: light; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #131318; --panel: #1c1c23; --text: #ececf1; --muted: #9a9aa8; --line: #2e2e38; --accent: #8b8bf5;
@@ -12,6 +13,7 @@
   }
 }
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #131318; --panel: #1c1c23; --text: #ececf1; --muted: #9a9aa8; --line: #2e2e38; --accent: #8b8bf5;
   --accent-soft: #26264a; --ok: #5cc98a; --ok-soft: #173225; --warn: #f0b252; --warn-soft: #3a2a12;
   --bad: #f07a7a; --bad-soft: #3d1a1a; --info: #7fb0ea; --info-soft: #182a40; --code: #24242d;
@@ -25,10 +27,11 @@ code, pre, .mono { font-family: var(--mono); font-size: 13px; }
 pre { background: var(--code); padding: 10px 12px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; margin: 6px 0; }
 .top { display: flex; align-items: center; gap: 24px; padding: 12px 24px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
 .brand { font-weight: 700; font-size: 18px; color: var(--text); display: flex; align-items: center; gap: 8px; }
-.logo { width: 46px; height: 29px; flex: none; will-change: transform; background: var(--accent); -webkit-mask: url(/logo.svg) center / contain no-repeat; mask: url(/logo.svg) center / contain no-repeat; }
-nav { display: flex; gap: 16px; flex: 1; }
-nav a { color: var(--muted); font-weight: 500; }
-nav a.active { color: var(--text); }
+.logo { width: 38px; height: 38px; flex: none; margin: -6px 0 -6px -6px; }
+nav { display: flex; gap: 16px; flex: 1; align-self: stretch; margin: -12px 0; } /* full header height: the bar sits on its bottom edge */
+nav a { display: flex; align-items: center; color: var(--muted); font-weight: 500; border-bottom: 2px solid transparent; padding-top: 2px; }
+nav a:hover { color: var(--text); text-decoration: none; border-bottom-color: var(--line); }
+nav a.active { color: var(--text); border-bottom-color: var(--accent); }
 main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 120px; }
 h1 { font-size: 24px; margin: 0 0 4px; }
 h2 { font-size: 18px; margin: 28px 0 10px; }
@@ -45,7 +48,7 @@ h3 { font-size: 15px; margin: 0; }
 .spread { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 label.field { display: grid; gap: 4px; margin: 10px 0; }
 label.field span { font-weight: 500; font-size: 13px; }
-input[type=text], input[type=number], select { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); width: 100%; max-width: 420px; }
+input[type=text], input[type=number], input[type=search], select { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); width: 100%; max-width: 420px; }
 label.check { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
 button { font: inherit; border-radius: 8px; padding: 7px 14px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
 button:hover { border-color: var(--accent); }
@@ -81,6 +84,7 @@ summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .seg button { border: 0; border-radius: 0; padding: 4px 12px; font-size: 13px; }
 .seg button.on { background: var(--accent); color: white; }
 .seg button.on.skip { background: var(--muted); }
+.theme button { padding: 3px 10px; font-size: 12px; }
 .log { max-height: 260px; overflow-y: auto; font-family: var(--mono); font-size: 12px; background: var(--code); border-radius: 8px; padding: 8px 12px; }
 .log div { white-space: pre-wrap; }
 .log .error { color: var(--bad); }
@@ -106,16 +110,24 @@ dialog::backdrop { background: rgba(0,0,0,.35); }
 dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 0; margin: 16px 0 0; }
 .empty { text-align: center; padding: 40px; color: var(--muted); }
 textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); width: 100%; resize: vertical; }
-.chatpage { display: grid; grid-template-columns: 200px minmax(0, 1fr) 210px; gap: 20px; align-items: start; }
-main:has(.chatpage) { max-width: 1320px; }
+.chatpage { display: grid; grid-template-columns: 250px minmax(0, 1fr) 240px; gap: 24px; align-items: start; }
+main:has(.chatpage) { max-width: none; padding-left: 24px; padding-right: 24px; }
 .quick { position: sticky; top: 72px; display: grid; gap: 8px; }
 .quickrun { padding: 10px 12px; }
 .quickrun .muted { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .chats { position: sticky; top: 72px; display: grid; gap: 10px; }
 .chatlist { display: grid; gap: 2px; max-height: calc(100vh - 220px); overflow-y: auto; }
-.chatlist a { color: var(--text); padding: 6px 8px; border-radius: 8px; font-size: 14px; }
-.chatlist a div:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chatlist a:hover, .chatlist a.active { background: var(--accent-soft); text-decoration: none; }
+.chats input[type=search] { font: inherit; font-size: 14px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); width: 100%; }
+.chatitem { display: flex; align-items: flex-start; gap: 4px; border-radius: 8px; }
+.chatitem a { flex: 1; min-width: 0; color: var(--text); padding: 6px 8px; font-size: 14px; }
+.chatitem a:hover { text-decoration: none; }
+.chatitem .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chatitem .snippet { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.chatitem:hover, .chatitem.active { background: var(--accent-soft); }
+.chatitem button.icon { border: 0; background: none; color: var(--muted); padding: 4px 8px; margin-top: 4px; visibility: hidden; font-size: 16px; line-height: 1; }
+.chatitem:hover button.icon, .chatitem.active button.icon, .chatitem button.icon:focus { visibility: visible; }
+.chatitem button.icon:hover { color: var(--bad); }
+@media (hover: none) { .chatitem button.icon { visibility: visible; } }
 .chatmain { min-width: 0; }
 .chat { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
 .chat .empty { padding: 32px 16px; }
@@ -140,6 +152,7 @@ main:has(.chatpage) { max-width: 1320px; }
 @media (max-width: 640px) {
   .top { gap: 12px; padding: 10px 16px; }
   #version { display: none; }
+  .theme button { padding: 3px 7px; }
   main { padding: 16px 16px 140px; }
   th:nth-child(4), td:nth-child(4) { display: none; }
   .chatpage { grid-template-columns: 1fr; gap: 8px; }
@@ -150,5 +163,5 @@ main:has(.chatpage) { max-width: 1320px; }
   .chatlist { max-height: 120px; }
   .msg, .msg.bibi, .msg.outcome { max-width: 100%; width: 100%; }
   .msg.user { max-width: 90%; width: auto; }
-  nav { overflow-x: auto; }
+  nav { overflow-x: auto; margin: -10px 0; }
 }

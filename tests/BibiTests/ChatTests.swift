@@ -200,4 +200,27 @@ final class Events: @unchecked Sendable {
         _ = Harness(skills: [], store: RunStore(root: tmp + "/runs"), graph: graph) { FakeModel() }
         #expect(graph.node("skill:test.fake")?.status == "retired")
     }
+
+    @Test func searchAndDelete() async throws {
+        let model = ScriptedModel(["ChatTurn": [turn("chat", reply: "The firewall question is noted.")], "Compact": [compactAnswer]])
+        let (chat, harness, graph) = engine(model)
+        let a = try chat.start(), b = try chat.start()
+        await chat.send(a, "is my firewall on?", emit: Events().emit)
+        await chat.send(b, "how much disk space is free", emit: Events().emit)
+        #expect(Set(chat.search("firewall").map(\.run.id)) == [a.id, b.id])  // b's reply mentions it too
+        #expect(chat.search("DISK free").map(\.run.id) == [b.id])
+        #expect(chat.search("disk").first?.snippet?.contains("disk space") == true)
+        #expect(chat.search("").count == 2)
+
+        let intents = graph.nodes(kind: "intent").filter { $0.props["seed"] == nil }.count
+        try chat.delete(a)
+        #expect(harness.store.find(a.id) == nil)
+        #expect(graph.node("conversation:" + a.id) == nil)
+        #expect(chat.conversations().map(\.id) == [b.id])
+        // What bibi learned stays.
+        #expect(graph.nodes(kind: "intent").filter { $0.props["seed"] == nil }.count == intents)
+        #expect(throws: ActionError.self) { try chat.delete(try #require(harness.store.list(skill: "chat").first.map { _ in
+            try harness.store.create(skill: "storage.optimize", args: [], online: false, version: "t") })) }
+    }
 }
+

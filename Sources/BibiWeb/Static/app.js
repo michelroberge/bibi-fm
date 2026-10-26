@@ -29,10 +29,9 @@ function h(tag, attrs, ...children) {
   return el;
 }
 
-async function api(path, body) {
-  const opts = { headers: { "X-Bibi-Token": token() } };
+async function api(path, body, method) {
+  const opts = { method: method || (body !== undefined ? "POST" : "GET"), headers: { "X-Bibi-Token": token() } };
   if (body !== undefined) {
-    opts.method = "POST";
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
@@ -433,19 +432,49 @@ async function undo(view, id, subscribe) {
 }
 
 // --- history ---------------------------------------------------------------------------------------
+// Searched and paged on the server; the search and page survive opening a run and coming back.
+const historyUI = { q: "", offset: 0 };
+const HISTORY_PAGE = 25;
+
 async function showHistory() {
-  const runs = await api("history");
+  const search = h("input", { type: "search", placeholder: "Search runs: command, arguments, summary…", value: historyUI.q, style: "width:100%;max-width:420px" });
+  const out = h("div", {});
+  let timer, seq = 0;
+  const load = async () => {
+    const mine = ++seq;
+    const page = await api(`history?q=${encodeURIComponent(historyUI.q)}&offset=${historyUI.offset}&limit=${HISTORY_PAGE}`);
+    if (mine !== seq) return; // a newer search already answered
+    if (!page.items.length && page.total && historyUI.offset) { historyUI.offset = 0; return load(); } // e.g. runs were deleted
+    out.replaceChildren(historyTable(page, load));
+  };
+  search.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { historyUI.q = search.value; historyUI.offset = 0; load().catch((e) => out.replaceChildren(errorBox(e))); }, 250);
+  });
   app().replaceChildren(h("h1", {}, "History"),
     h("p", { class: "muted" }, "Every run is saved with its evidence, model calls, the actions you chose and their results."),
-    runs.length ? h("div", { class: "panel" }, h("table", {},
-      h("tr", {}, h("th", {}, "When"), h("th", {}, "Command"), h("th", {}, "Result"), h("th", {}, "Options")),
-      runs.map((r) => h("tr", { class: "click", onclick: () => location.hash = "#/run/" + encodeURIComponent(r.meta.id) },
-        h("td", { class: "small" }, when(r.meta.started)),
-        h("td", {}, r.meta.skill),
-        h("td", { class: "small" }, r.meta.error ? h("span", { class: "pill bad" }, "failed")
-          : r.meta.finished ? `${r.meta.findings ?? 0} findings` : h("span", { class: "pill" }, "running"),
-          r.undoable ? h("span", { class: "pill warn", style: "margin-left:6px" }, `${r.undoable} undoable`) : null),
-        h("td", { class: "small mono muted" }, r.meta.args.join(" ")))))) : h("div", { class: "empty" }, "No runs yet."));
+    search, out);
+  await load();
+}
+
+function historyTable(page, reload) {
+  if (!page.total) return h("div", { class: "empty" }, historyUI.q ? "No runs match this search." : "No runs yet.");
+  const go = (offset) => { historyUI.offset = offset; reload().then(() => window.scrollTo(0, 0)).catch((e) => app().append(errorBox(e))); };
+  const first = page.offset + 1, last = page.offset + page.items.length;
+  const pager = h("div", { class: "spread", style: "margin-top:10px" },
+    h("span", { class: "muted small" }, `${first}–${last} of ${page.total}`),
+    h("span", { class: "row" },
+      h("button", { class: "small", disabled: page.offset === 0, onclick: () => go(Math.max(0, page.offset - page.limit)) }, "‹ Newer"),
+      h("button", { class: "small", disabled: last >= page.total, onclick: () => go(page.offset + page.limit) }, "Older ›")));
+  return h("div", { class: "panel" }, h("table", {},
+    h("tr", {}, h("th", {}, "When"), h("th", {}, "Command"), h("th", {}, "Result"), h("th", {}, "Options")),
+    page.items.map((r) => h("tr", { class: "click", onclick: () => location.hash = "#/run/" + encodeURIComponent(r.meta.id) },
+      h("td", { class: "small" }, when(r.meta.started)),
+      h("td", {}, r.meta.skill),
+      h("td", { class: "small" }, r.meta.error ? h("span", { class: "pill bad" }, "failed")
+        : r.meta.finished ? `${r.meta.findings ?? 0} findings` : h("span", { class: "pill" }, "running"),
+        r.undoable ? h("span", { class: "pill warn", style: "margin-left:6px" }, `${r.undoable} undoable`) : null),
+      h("td", { class: "small mono muted" }, r.meta.args.join(" "))))), pager);
 }
 
 // --- changes (baseline diff) ---------------------------------------------------------------------
@@ -474,30 +503,156 @@ async function showDiff(skill) {
   load();
 }
 
-// --- logo: slow free tumble about its centre ---------------------------------------------------------
+// --- theme: auto (device setting), light or dark; the choice is kept per browser --------------------
 (() => {
-  const logo = document.querySelector(".logo");
-  if (!logo || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  const speed = 0.5; // rad/s
-  let q = [1, 0, 0, 0]; // orientation quaternion [w, x, y, z]
-  let last = performance.now();
+  const buttons = document.querySelectorAll("[data-theme-choice]");
+  const apply = (choice) => {
+    if (choice === "auto") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = choice;
+    try { choice === "auto" ? localStorage.removeItem("bibi-theme") : localStorage.setItem("bibi-theme", choice); } catch {}
+    buttons.forEach((b) => { b.classList.toggle("on", b.dataset.themeChoice === choice); b.setAttribute("aria-pressed", b.dataset.themeChoice === choice); });
+    document.dispatchEvent(new Event("themechange"));
+  };
+  buttons.forEach((b) => b.addEventListener("click", () => apply(b.dataset.themeChoice)));
+  apply(document.documentElement.dataset.theme || "auto");
+})();
+
+// --- logo: a sphere head lit from inside, drawn in 3D on a canvas -----------------------------------
+(() => {
+  const canvas = document.querySelector(".logo");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const size = canvas.clientWidth, dpr = devicePixelRatio || 1;
+  canvas.width = canvas.height = size * dpr;
+  ctx.scale(dpr, dpr);
+  const c = size / 2, m = size * 0.57, R = size * 0.31; // centre sits low to leave room for the antenna
+
+  const rgb = (hex) => { const n = parseInt(hex.trim().slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; };
+  const mix = ([r, g, b], [r2, g2, b2], k) => `rgb(${r + (r2 - r) * k | 0},${g + (g2 - g) * k | 0},${b + (b2 - b) * k | 0})`;
+  const norm = ([x, y, z]) => { const l = Math.hypot(x, y, z); return [x / l, y / l, z / l]; };
+
+  // Head space: x right, y up, z towards the viewer. Orthographic projection.
+  const EYES = [norm([-0.4, 0.14, 0.9]), norm([0.4, 0.14, 0.9])];
+  let M; // rotation matrix rows, rebuilt each frame from yaw / pitch / roll
+  const rotate = ([x, y, z]) => [M[0] * x + M[1] * y + M[2] * z, M[3] * x + M[4] * y + M[5] * z, M[6] * x + M[7] * y + M[8] * z];
+  const screen = ([x, y], r = R) => [c + x * r, m - y * r];
+
+  // A circle of angular radius `a` around surface direction `n` (already rotated), lifted to radius `lift`.
+  const disc = (n, a, lift = 1) => {
+    const [x, y] = screen(n, R * lift * Math.cos(a));
+    const r = R * lift * Math.sin(a);
+    ctx.beginPath();
+    ctx.ellipse(x, y, Math.max(r * Math.abs(n[2]), 0.01), r, Math.atan2(-n[1], n[0]), 0, 2 * Math.PI); // squashed along the tilt
+  };
+
+  const draw = (yaw, pitch, roll, light, beacon) => {
+    // Positive yaw turns to the viewer's right, positive pitch looks up.
+    const [cy, sy, cp, sp, cr, sr] = [Math.cos(yaw), Math.sin(yaw), Math.cos(pitch), -Math.sin(pitch), Math.cos(roll), Math.sin(roll)];
+    // R = Rz(roll) · Rx(pitch) · Ry(yaw)
+    M = [cr * cy - sr * sp * sy, -sr * cp, cr * sy + sr * sp * cy,
+         sr * cy + cr * sp * sy, cr * cp, sr * sy - cr * sp * cy,
+         -cp * sy, sp, cp * cy];
+    const accent = rgb(getComputedStyle(document.documentElement).getPropertyValue("--accent") || "#5b5bd6");
+    const white = [255, 255, 255], black = [0, 0, 0], metal = [150, 150, 165];
+    ctx.clearRect(0, 0, size, size);
+
+    // Parts that stick out of the sphere: ear bolts and the antenna. Behind the head -> drawn before it.
+    const ears = [[1, 0, 0], [-1, 0, 0]].map(rotate);
+    const base = rotate([0, 1, 0]), tip = rotate(norm([0.18, 1, -0.1]));
+    const ear = (n) => {
+      disc(n, 0.42, 1.0); ctx.fillStyle = mix(metal, black, 0.45); ctx.fill();
+      disc(n, 0.3, 1.13); ctx.fillStyle = mix(metal, white, 0.15 + 0.3 * Math.max(0, n[1] - n[0] * 0.5)); ctx.fill();
+    };
+    const antenna = () => {
+      const [bx, by] = screen(base), [tx, ty] = screen(tip, R * 1.45);
+      ctx.strokeStyle = mix(metal, black, 0.3); ctx.lineWidth = 1.4; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(tx, ty); ctx.stroke();
+      const g = ctx.createRadialGradient(tx, ty, 0, tx, ty, 3.5);
+      g.addColorStop(0, `rgba(255,90,90,${0.9 * beacon})`); g.addColorStop(1, "rgba(255,90,90,0)");
+      ctx.fillStyle = g; ctx.fillRect(tx - 4, ty - 4, 8, 8);
+      ctx.beginPath(); ctx.arc(tx, ty, 1.9, 0, 2 * Math.PI); ctx.fillStyle = mix([150, 40, 40], [255, 120, 110], beacon); ctx.fill();
+    };
+    ears.filter((n) => n[2] < 0).forEach(ear);
+    if (tip[2] < 0) antenna();
+
+    // The sphere itself: fixed key light from the upper left, so plain shading reads as 3D at any pose.
+    const g = ctx.createRadialGradient(c - R * 0.4, m - R * 0.45, R * 0.05, c, m, R * 1.05);
+    g.addColorStop(0, mix(accent, white, 0.55)); g.addColorStop(0.45, mix(accent, white, 0.05)); g.addColorStop(1, mix(accent, black, 0.55));
+    ctx.beginPath(); ctx.arc(c, m, R, 0, 2 * Math.PI); ctx.fillStyle = g; ctx.fill();
+
+    ctx.save();
+    ctx.beginPath(); ctx.arc(c, m, R, 0, 2 * Math.PI); ctx.clip();
+    // Panel seam below the eyes: the visible half of a latitude ring.
+    ctx.strokeStyle = mix(accent, black, 0.5); ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    for (let i = 0, pen = false; i <= 48; i++) {
+      const t = i / 48 * 2 * Math.PI, p = rotate([0.94 * Math.cos(t), -0.34, 0.94 * Math.sin(t)]);
+      if (p[2] < 0) { pen = false; continue; }
+      const [x, y] = screen(p);
+      pen ? ctx.lineTo(x, y) : ctx.moveTo(x, y); pen = true;
+    }
+    ctx.stroke();
+    // Eye holes, with the bulb inside showing through.
+    for (const e of EYES.map(rotate)) {
+      if (e[2] <= 0) continue;
+      disc(e, 0.27); ctx.fillStyle = mix(accent, black, 0.8); ctx.fill();
+      disc(e, 0.2);
+      const [x, y] = screen(e);
+      const bulb = ctx.createRadialGradient(x, y, 0, x, y, R * 0.22);
+      bulb.addColorStop(0, mix([255, 220, 120], [255, 255, 245], light)); bulb.addColorStop(1, mix([90, 60, 20], [255, 190, 60], light));
+      ctx.fillStyle = bulb; ctx.fill();
+    }
+    ctx.restore();
+
+    if (tip[2] >= 0) antenna();
+    ears.filter((n) => n[2] >= 0).forEach(ear);
+
+    // Light spilling out of the eyes: strongest when they face the viewer, it streaks outwards as the head turns.
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    for (const e of EYES.map(rotate)) {
+      if (e[2] <= 0) continue;
+      const [x, y] = screen(e), k = light * e[2];
+      for (let i = 0; i < 4; i++) {
+        const [bx, by] = [x + e[0] * R * 0.22 * i, y - e[1] * R * 0.22 * i], r = R * (0.28 + 0.07 * i);
+        const glow = ctx.createRadialGradient(bx, by, 0, bx, by, r);
+        glow.addColorStop(0, `rgba(255,214,110,${0.55 * k / (1 + i)})`); glow.addColorStop(1, "rgba(255,214,110,0)");
+        ctx.fillStyle = glow; ctx.fillRect(bx - r, by - r, 2 * r, 2 * r);
+      }
+    }
+    ctx.restore();
+  };
+
+  if (still) {
+    const redraw = () => draw(-0.25, 0.1, 0, 1, 1);
+    redraw();
+    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redraw);
+    document.addEventListener("themechange", redraw);
+    return;
+  }
+
+  // Motion: the head snaps between gaze targets like a servo, follows the pointer when it is around, and blinks.
+  let pose = [0, 0], target = [0, 0], nextLook = 0, pointerUntil = 0, blinkAt = performance.now() + 3000, last = performance.now();
+  addEventListener("pointermove", (ev) => {
+    const r = canvas.getBoundingClientRect();
+    const dx = ev.clientX - (r.left + r.width / 2), dy = ev.clientY - (r.top + r.height / 2);
+    target = [Math.atan(dx / 250) * 0.9, Math.atan(-dy / 250) * 0.6];
+    pointerUntil = performance.now() + 2500;
+  });
   const frame = (now) => {
     const dt = Math.min(now - last, 100) / 1000, t = now / 1000;
     last = now;
-    // The spin axis wanders over the sphere; incommensurate periods keep the path from repeating.
-    const ax = Math.sin(t * 0.13), ay = Math.sin(t * 0.17 + 2), az = 0.5 * Math.sin(t * 0.07 + 4);
-    const half = speed * dt / 2, s = Math.sin(half) / (Math.hypot(ax, ay, az) || 1);
-    const [bw, bx, by, bz] = [Math.cos(half), ax * s, ay * s, az * s];
-    const [w, x, y, z] = q;
-    q = [bw * w - bx * x - by * y - bz * z,
-         bw * x + bx * w + by * z - bz * y,
-         bw * y - bx * z + by * w + bz * x,
-         bw * z + bx * y - by * x + bz * w];
-    const n = Math.hypot(...q) * (q[0] < 0 ? -1 : 1);
-    q = q.map((v) => v / n);
-    const angle = 2 * Math.acos(Math.min(1, q[0]));
-    const [rx, ry, rz] = angle > 1e-6 ? q.slice(1) : [0, 0, 1];
-    logo.style.transform = `perspective(160px) rotate3d(${rx}, ${ry}, ${rz}, ${angle}rad)`;
+    if (now > pointerUntil && now > nextLook) {
+      target = [(Math.random() * 2 - 1) * 0.9, (Math.random() * 2 - 1) * 0.3 + 0.05];
+      nextLook = now + 1500 + Math.random() * 2500;
+    }
+    const k = 1 - Math.exp(-dt * 7);
+    pose = pose.map((v, i) => v + (target[i] - v) * k);
+    if (now > blinkAt + 160) blinkAt = now + 3000 + Math.random() * 4000;
+    const light = now > blinkAt ? 0.15 : 0.92 + 0.08 * Math.sin(t * 9);
+    const roll = 0.08 * Math.sin(t * 0.7) - (target[0] - pose[0]) * 0.25;
+    draw(pose[0], pose[1], roll, light, 0.5 + 0.5 * Math.sin(t * 3));
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

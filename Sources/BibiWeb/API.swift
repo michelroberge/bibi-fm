@@ -32,6 +32,11 @@ struct HistoryItem: Encodable {
     var undoable: Int
 }
 
+struct HistoryPage: Encodable {
+    var items: [HistoryItem]
+    var total, offset, limit: Int
+}
+
 struct ExecuteBody: Decodable {
     var actions: [String]
     var confirmAdmin: Bool?
@@ -70,11 +75,6 @@ struct DecideBody: Decodable {
     var dryRun: Bool?
 }
 
-struct QuickBody: Decodable {
-    var conversation: String?
-    var skill: String
-}
-
 struct GuidanceBody: Decodable {
     var text: String
 }
@@ -96,6 +96,8 @@ struct ChatItem: Encodable {
     var title: String
     var started: Date
     var actions: Int
+    var undoable: Int
+    var snippet: String?
 }
 
 struct API: Sendable {
@@ -105,8 +107,9 @@ struct API: Sendable {
 
     func register(_ api: RouterGroup<BasicRequestContext>) {
         api.get("skills") { _, _ in json(harness.sortedSkills.map(info)) }
+        let hostName = Host.current().localizedName ?? "" // the Computer Name set in System Settings > Sharing
         api.get("catalog") { _, _ in
-            json(["version": JSONValue.string(Bibi.version),
+            json(["version": JSONValue.string(Bibi.version), "hostName": .string(hostName),
                   "diagnostics": (try? JSON.decode(JSONValue.self, from: JSON.string(Diagnostics.all))) ?? .null,
                   "actions": .array(harness.registry.all.map {
                       .object(["id": .string($0.id), "summary": .string($0.summary), "privilege": .string($0.privilege.rawValue),
@@ -171,10 +174,15 @@ struct API: Sendable {
             }
         }
         api.get("history") { req, _ in
-            let skill = req.uri.queryParameters["skill"].map(String.init)
-            return json(harness.store.list(skill: skill?.isEmpty == false ? skill : nil).prefix(200).map {
-                HistoryItem(meta: $0.meta, undoable: $0.undoable.count)
-            })
+            let params = req.uri.queryParameters
+            let skill = params["skill"].map(String.init)
+            let query = params["q"].map(String.init) ?? ""
+            let offset = max(0, params["offset"].flatMap { Int($0) } ?? 0)
+            let limit = min(100, max(1, params["limit"].flatMap { Int($0) } ?? 25))
+            let runs = harness.store.list(skill: skill?.isEmpty == false ? skill : nil).filter { $0.meta.matches(query) }
+            // Undo counts read each run's journal, so only the requested page pays for them.
+            let page = runs.dropFirst(offset).prefix(limit).map { HistoryItem(meta: $0.meta, undoable: $0.undoable.count) }
+            return json(HistoryPage(items: Array(page), total: runs.count, offset: offset, limit: limit))
         }
         api.get("diff") { req, _ in
             guard let name = req.uri.queryParameters["skill"].map(String.init), let skill = harness.skill(named: name) else {
@@ -207,10 +215,19 @@ struct API: Sendable {
     /// Chat: each conversation is a run of the `chat` skill, so its events, journal and undo use the run machinery.
     /// Turns run in the background; the page follows them on the run's event stream.
     func registerChat(_ api: RouterGroup<BasicRequestContext>) {
-        api.get("chats") { _, _ in
-            json(try engine().conversations().prefix(100).map { r in
-                ChatItem(id: r.id, title: r.meta.summary ?? "Chat", started: r.meta.started, actions: r.meta.actions ?? 0)
+        api.get("chats") { req, _ in
+            let q = req.uri.queryParameters["q"].map(String.init) ?? ""
+            return json(try engine().search(q).prefix(200).map { m in
+                ChatItem(id: m.run.id, title: m.run.meta.summary ?? "Chat", started: m.run.meta.started,
+                         actions: m.run.meta.actions ?? 0, undoable: m.run.undoable.count, snippet: m.snippet)
             })
+        }
+        api.delete("chat/:id") { _, ctx in
+            let chat = try engine()
+            let run = try chatRun(ctx)
+            guard manager.hub(run.id).busy == nil else { throw HTTPError(.conflict, message: "bibi is still working on this chat") }
+            try chat.delete(run)
+            return json(["ok": true])
         }
         api.post("chat") { req, _ in
             let chat = try engine()
@@ -286,29 +303,6 @@ struct API: Sendable {
         }
 
         api.get("graph/quick") { _, _ in json(try engine().quickSkills()) }
-        api.post("chat/quick") { req, _ in
-            let chat = try engine()
-            let b = try await decode(req, QuickBody.self)
-            guard harness.skill(named: b.skill) != nil else { throw HTTPError(.notFound, message: "unknown skill \(b.skill)") }
-            let run: RunRecord
-            if let id = b.conversation, !id.isEmpty {
-                guard let r = harness.store.find(id), r.meta.skill == "chat" else { throw HTTPError(.notFound, message: "no chat \(id)") }
-                run = r
-            } else {
-                run = try chat.start()
-            }
-            let hub = manager.hub(run.id)
-            guard hub.begin("decide") else { throw HTTPError(.conflict, message: "bibi is still busy with this chat (\(hub.busy ?? ""))") }
-            Task {
-                do {
-                    _ = try await chat.quickRun(run, skill: b.skill, admin: OsascriptRunner()) { hub.emit($0, $1, phase: "chat") }
-                } catch {
-                    hub.emit("error", "\(error)", phase: "chat")
-                }
-                hub.emit("done", "quick", phase: "chat")
-            }
-            return json(["id": run.id])
-        }
         api.get("graph/skills") { _, _ in json(SkillLibrary.all(try engine().graph)) }
         api.post("graph/skills/:name/:verb") { _, ctx in
             let chat = try engine()

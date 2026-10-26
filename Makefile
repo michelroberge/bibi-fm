@@ -2,7 +2,7 @@ PREFIX ?= $(HOME)/.local
 BIN := $(PREFIX)/bin
 LIBEXEC := $(PREFIX)/libexec/bibi
 
-.PHONY: build release test install uninstall clean
+.PHONY: build release test install uninstall clean bump
 
 build:
 	swift build
@@ -28,3 +28,10 @@ uninstall:
 
 clean:
 	swift package clean
+
+# Sets the version in VERSION and Sources/BibiCore/Version.swift: make bump V=0.4.0
+bump:
+	@test -n "$(V)" || (echo "usage: make bump V=x.y.z" && exit 2)
+	echo "$(V)" > VERSION
+	sed -i '' 's/static let version = "[^"]*"/static let version = "$(V)"/' Sources/BibiCore/Version.swift
+	@echo "bibi is now $(V)"

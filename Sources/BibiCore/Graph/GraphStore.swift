@@ -126,6 +126,18 @@ public final class GraphStore: Sendable {
 
     public func setStatus(_ id: String, _ status: String) { update(id) { $0.status = status } }
 
+    /// Removes a node with its edges, search entry and embedding. Events about it stay (they are statistics).
+    public func delete(_ id: String) {
+        _ = try? db.withLock { d in
+            try d.transaction {
+                for sql in ["DELETE FROM nodes WHERE id = ?", "DELETE FROM edges WHERE src = ? OR dst = ?",
+                            "DELETE FROM nodes_fts WHERE id = ?", "DELETE FROM vectors WHERE node = ?"] {
+                    try d.query(sql, Array(repeating: SQLValue.text(id), count: sql.filter { $0 == "?" }.count))
+                }
+            }
+        }
+    }
+
     // MARK: edges
 
     public func link(_ src: String, _ dst: String, _ kind: String, weight: Double = 1, props: [String: JSONValue] = [:]) {

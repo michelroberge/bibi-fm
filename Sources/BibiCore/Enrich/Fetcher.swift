@@ -63,7 +63,3 @@ public struct Fetcher: Sendable {
         return out
     }
 }
-
-public enum Bibi {
-    public static let version = "0.2.0"
-}

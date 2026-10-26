@@ -155,6 +155,20 @@ struct FakeAdminUndo: ActionSpec {
     }
 }
 
+@Suite struct RunSearchTests {
+    @Test func matchesVisibleFields() throws {
+        let run = try RunStore(root: tempDir() + "/runs").create(skill: "sys.health", args: ["--top", "5"], online: false, version: "1")
+        run.updateMeta { $0.summary = "Disk is nearly full" }
+        let meta = run.meta
+        #expect(meta.matches(""))
+        #expect(meta.matches("HEALTH"))
+        #expect(meta.matches("--top 5"))
+        #expect(meta.matches("nearly full"))
+        #expect(meta.matches(String(meta.id.suffix(4))))
+        #expect(!meta.matches("network"))
+    }
+}
+
 @Suite struct BaselineTests {
     @Test func genericDiff() {
         let old: [String: JSONValue] = ["apps": .object(["Slack": .string("4.1"), "Zoom": .string("6.0")]),
