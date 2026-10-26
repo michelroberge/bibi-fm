@@ -1,0 +1,4 @@
+2026-10-26 15:20:00 -0400 CPU Power notify
+	CPU_Scheduler_Limit 	= 100
+	CPU_Available_CPUs 	= 10
+	CPU_Speed_Limit 	= 70

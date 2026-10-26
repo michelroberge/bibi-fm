@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>bibi</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%235b5bd6'/%3E%3Ccircle cx='11' cy='14' r='3' fill='white'/%3E%3Ccircle cx='21' cy='14' r='3' fill='white'/%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="#/"><span class="logo" aria-hidden="true"></span>bibi</a>
+    <nav>
+      <a href="#/" data-nav="home">Run</a>
+      <a href="#/history" data-nav="history">History</a>
+      <a href="#/diff" data-nav="diff">Changes</a>
+    </nav>
+    <span class="muted small" id="version"></span>
+  </header>
+  <main id="app" aria-live="polite"></main>
+  <div id="bar" class="actionbar" hidden></div>
+  <dialog id="confirm">
+    <form method="dialog">
+      <h3 id="confirm-title"></h3>
+      <div id="confirm-body"></div>
+      <menu>
+        <button value="cancel" class="secondary">Cancel</button>
+        <button value="ok" id="confirm-ok" class="primary">Continue</button>
+      </menu>
+    </form>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+Processes: 812 total, 4 running, 808 sleeping, 4401 threads 
+2026/10/26 15:20:01
+Load Avg: 3.78, 3.74, 3.91 
+CPU usage: 9.00% user, 4.00% sys, 87.00% idle 
+PhysMem: 15G used (2079M wired, 5473M compressor), 94M unused.
+VM: 314T vsize, 57G framework vsize, 6834(0) swapins, 58216(0) swapouts.
+
+PID    COMMAND          %CPU MEM    USER         
+1      launchd          0.0  20M    root         
+Processes: 812 total, 4 running, 808 sleeping, 4401 threads 
+2026/10/26 15:20:02
+Load Avg: 14.20, 9.74, 6.91 
+CPU usage: 62.36% user, 14.78% sys, 22.85% idle 
+PhysMem: 15G used (2079M wired, 5473M compressor), 94M unused.
+VM: 314T vsize, 57G framework vsize, 6834(0) swapins, 58216(0) swapouts.
+Networks: packets: 23218957/26G in, 12218900/10G out.
+Disks: 7501376/149G read, 2968607/96G written.
+
+PID    COMMAND          %CPU MEM    USER         
+80894  Comet Helper (Re 144.3 536M-  testuser
+0      kernel_task      11.0 153M+  root         
+603    WindowServer     10.8 1150M- _windowserver
+1806   Comet            7.8  2G     testuser

@@ -1,0 +1,3 @@
+{"Containers":"N/A","CreatedAt":"2026-05-01 10:00:00 -0400 EDT","CreatedSince":"5 months ago","Digest":"<none>","ID":"aaaaaaaaaaaa","Repository":"node","SharedSize":"N/A","Size":"1.1GB","Tag":"18","UniqueSize":"N/A","VirtualSize":"1.1GB"}
+{"Containers":"N/A","CreatedAt":"2026-09-01 10:00:00 -0400 EDT","CreatedSince":"8 weeks ago","Digest":"<none>","ID":"bbbbbbbbbbbb","Repository":"postgres","SharedSize":"N/A","Size":"420MB","Tag":"16","UniqueSize":"N/A","VirtualSize":"420MB"}
+{"Containers":"N/A","CreatedAt":"2026-09-02 10:00:00 -0400 EDT","CreatedSince":"8 weeks ago","Digest":"<none>","ID":"cccccccccccc","Repository":"<none>","SharedSize":"N/A","Size":"812MB","Tag":"<none>","UniqueSize":"N/A","VirtualSize":"812MB"}

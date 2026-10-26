@@ -1,0 +1,1 @@
+{"BuildCache":[{"ID":"x1","InUse":false,"Size":"1.5GB"},{"ID":"x2","InUse":true,"Size":"200MB"}],"Containers":[],"Images":[],"Volumes":[{"Name":"pgdata","Links":"1","Size":"300MB"},{"Name":"old_cache","Links":"0","Size":"2GB"}]}

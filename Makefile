@@ -1,14 +1,30 @@
-PREFIX ?= $(HOME)/.local/bin
+PREFIX ?= $(HOME)/.local
+BIN := $(PREFIX)/bin
+LIBEXEC := $(PREFIX)/libexec/bibi
 
-.PHONY: install uninstall test
+.PHONY: build release test install uninstall clean
 
-install:
-	mkdir -p $(PREFIX)
-	ln -sf $(CURDIR)/bin/bibi $(PREFIX)/bibi
-	@echo "Installed $(PREFIX)/bibi (make sure $(PREFIX) is on your PATH)"
+build:
+	swift build
 
-uninstall:
-	rm -f $(PREFIX)/bibi
+release:
+	swift build -c release
 
 test:
-	python3 -m unittest discover -s tests -v
+	swift run bibi-tests
+
+# The binary needs its resource bundle (web UI files) next to it, so both go to libexec and bin gets a symlink.
+install: release
+	mkdir -p $(BIN) $(LIBEXEC)
+	cp .build/release/bibi $(LIBEXEC)/bibi
+	rm -rf $(LIBEXEC)/bibi_BibiWeb.bundle
+	cp -R .build/release/bibi_BibiWeb.bundle $(LIBEXEC)/
+	ln -sf $(LIBEXEC)/bibi $(BIN)/bibi
+	@echo "Installed $(BIN)/bibi (make sure $(BIN) is on your PATH)"
+
+uninstall:
+	rm -f $(BIN)/bibi
+	rm -rf $(LIBEXEC)
+
+clean:
+	swift package clean

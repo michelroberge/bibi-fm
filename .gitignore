@@ -1,4 +1,11 @@
-# Python
+# Swift / SwiftPM
+.build/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+
+# Python (legacy version, removed after the Swift port)
 __pycache__/
 *.py[cod]
 *.egg-info/

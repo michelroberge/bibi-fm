@@ -1,0 +1,1 @@
+{"Command":"\"docker-entrypoint.s…\"","CreatedAt":"2026-09-01","ID":"0123456789ab","Image":"postgres:16","Names":"db","State":"exited","Status":"Exited (0) 3 weeks ago"}
