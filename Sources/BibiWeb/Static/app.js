@@ -77,6 +77,8 @@ function confirmDialog(title, bodyNodes, okLabel, danger) {
   });
 }
 
+document.getElementById("version").addEventListener("click", () => document.getElementById("about").showModal());
+
 // --- router --------------------------------------------------------------------------------------
 async function route() {
   if (currentStream) { currentStream.close(); currentStream = null; }
@@ -663,6 +665,7 @@ async function showDiff(skill) {
   try {
     [skills, catalog] = await Promise.all([api("skills"), api("catalog")]);
     document.getElementById("version").textContent = "v" + catalog.version;
+    document.getElementById("about-version").textContent = "Version " + catalog.version + ".";
   } catch (e) {
     app().replaceChildren(errorBox(e));
     return;

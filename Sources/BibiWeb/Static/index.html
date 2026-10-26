@@ -23,7 +23,7 @@
       <button data-theme-choice="light">Light</button>
       <button data-theme-choice="dark">Dark</button>
     </span>
-    <span class="muted small" id="version"></span>
+    <button type="button" class="muted small" id="version" title="About bibi"></button>
   </header>
   <main id="app" aria-live="polite"></main>
   <div id="bar" class="actionbar" hidden></div>
@@ -35,6 +35,15 @@
         <button value="cancel" class="secondary">Cancel</button>
         <button value="ok" id="confirm-ok" class="primary">Continue</button>
       </menu>
+    </form>
+  </dialog>
+  <dialog id="about">
+    <form method="dialog">
+      <h3>About bibi</h3>
+      <p>A local agent on the macOS Foundation Model. <span class="muted" id="about-version"></span></p>
+      <p><a href="https://github.com/michelroberge/bibi-fm" target="_blank" rel="noopener">github.com/michelroberge/bibi-fm</a></p>
+      <p class="muted small">&copy; 2026 Michel Roberge. Licensed under the PolyForm Noncommercial License 1.0.0; commercial use needs written permission.</p>
+      <menu><button value="close" class="primary">Close</button></menu>
     </form>
   </dialog>
   <script src="/chat.js"></script>

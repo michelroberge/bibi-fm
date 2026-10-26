@@ -107,6 +107,8 @@ tr.click:hover td { background: var(--accent-soft); }
 .result.fail::before { content: "✗ "; color: var(--bad); }
 dialog { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); color: var(--text); max-width: 520px; width: calc(100% - 32px); }
 dialog::backdrop { background: rgba(0,0,0,.35); }
+#version { background: none; border: 0; padding: 0; font: inherit; color: var(--muted); cursor: pointer; }
+#version:hover { color: var(--text); text-decoration: underline; }
 dialog menu { display: flex; gap: 8px; justify-content: flex-end; padding: 0; margin: 16px 0 0; }
 .empty { text-align: center; padding: 40px; color: var(--muted); }
 textarea { font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); width: 100%; resize: vertical; }

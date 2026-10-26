@@ -37,6 +37,8 @@ public struct ChatState: Codable, Sendable {
     /// Read-only commands that check the findings of the last skill run in this chat (from its diagnostics),
     /// so a follow-up like "show me those faults" has the right command at hand.
     public var hints: [String]?
+    /// Steps bibi couldn't run yet and why, kept for one turn so the user's answer can complete them.
+    public var draft: String?
 
     public init(id: String, title: String) { self.id = id; self.title = title }
 }
