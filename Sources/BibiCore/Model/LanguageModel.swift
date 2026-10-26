@@ -28,13 +28,27 @@ public struct Schema: Sendable {
 
 public struct LLMError: Error, CustomStringConvertible {
     public let description: String
-    public init(_ d: String) { description = d }
+    /// The prompt didn't fit the model's context window: retry with less context.
+    public var contextOverflow = false
+    public init(_ d: String, contextOverflow: Bool = false) { description = d; self.contextOverflow = contextOverflow }
 }
 
 /// The only interface skills use to talk to a model. Each call is independent and stateless,
 /// and prompts stay small: the on-device model has a ~4k token context.
 public protocol LanguageModel: Sendable {
     func respond(_ prompt: String, instructions: String, schema: Schema) async throws -> JSONValue
+    /// Like respond, calling `partial` with incomplete output as it is generated (for chat replies).
+    func stream(_ prompt: String, instructions: String, schema: Schema,
+                partial: @escaping @Sendable (JSONValue) -> Void) async throws -> JSONValue
+}
+
+extension LanguageModel {
+    public func stream(_ prompt: String, instructions: String, schema: Schema,
+                       partial: @escaping @Sendable (JSONValue) -> Void) async throws -> JSONValue {
+        let r = try await respond(prompt, instructions: instructions, schema: schema)
+        partial(r)
+        return r
+    }
 }
 
 extension LanguageModel {

@@ -22,7 +22,7 @@ function h(tag, attrs, ...children) {
     else if (k === "html") throw new Error("no raw html");
     else el.setAttribute(k, v === true ? "" : v);
   }
-  for (const c of children.flat()) {
+  for (const c of children.flat(Infinity)) {
     if (c === null || c === undefined || c === false) continue;
     el.append(c instanceof Node ? c : document.createTextNode(String(c)));
   }
@@ -88,7 +88,9 @@ async function route() {
     a.classList.toggle("active", a.dataset.nav === (view || "home") || (view === "run" && a.dataset.nav === "home"));
   }
   try {
-    if (view === "run" && id) await showRun(decodeURIComponent(id));
+    if (view === "chat") { await showChat(id ? decodeURIComponent(id) : ""); return; }
+    else if (view === "skills") await showSkills();
+    else if (view === "run" && id) await showRun(decodeURIComponent(id));
     else if (view === "history") await showHistory();
     else if (view === "diff") await showDiff(id ? decodeURIComponent(id) : "");
     else await showHome();
@@ -344,13 +346,13 @@ function diagnosticRow(d, f, view, id, subscribe) {
     out);
 }
 
-function recommendation(a, view, id, dec, executed) {
+function recommendation(a, view, id, dec, executed, rerender = route) {
   const info = view.actionInfo[a.id] || {};
   const state = dec[a.id];
   const preview = h("div", {});
   const seg = h("span", { class: "seg" },
-    h("button", { class: state === "approve" ? "on" : "", onclick: () => { dec[a.id] = state === "approve" ? undefined : "approve"; route(); } }, "Approve"),
-    h("button", { class: state === "skip" ? "on skip" : "", onclick: () => { dec[a.id] = state === "skip" ? undefined : "skip"; route(); } }, "Skip"));
+    h("button", { class: state === "approve" ? "on" : "", onclick: () => { dec[a.id] = state === "approve" ? undefined : "approve"; rerender(); } }, "Approve"),
+    h("button", { class: state === "skip" ? "on skip" : "", onclick: () => { dec[a.id] = state === "skip" ? undefined : "skip"; rerender(); } }, "Skip"));
   return h("div", { class: "rec " + (state === "approve" ? "approved" : state === "skip" ? "skipped" : "") },
     h("div", { class: "spread" },
       h("div", {}, h("strong", {}, a.title), executed.has(a.id) ? h("span", { class: "pill ok", style: "margin-left:8px" }, "done") : null),

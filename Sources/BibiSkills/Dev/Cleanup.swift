@@ -7,6 +7,7 @@ public struct DevCleanup: Skill {
     public init() {}
     public let name = "dev.cleanup"
     public let help = "Find build artifacts, Docker leftovers, package caches, unused SDKs and stale git worktrees"
+    public let keywords = "developer projects node_modules build artifacts docker images sdk sdks worktree worktrees xcode deriveddata dev"
     public var params: [Param] {
         [
             .option("root", "--root", kind: .list, help: "folder with your projects (repeatable; default: ~/dev ~/src ~/code ~/projects ~/work ~/Developer)"),

@@ -65,7 +65,7 @@ public struct WebServer: Sendable {
             quiet.logLevel = .warning
             router.add(middleware: FileMiddleware(root, searchForIndexHtml: true, logger: quiet))
         }
-        let api = API(harness: harness, manager: manager)
+        let api = API(harness: harness, manager: manager, chat: harness.graph.map { ChatEngine(harness: harness, graph: $0) })
         api.register(router.group("api"))
         return router
     }

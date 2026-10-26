@@ -7,6 +7,7 @@ public struct SecAudit: Skill {
     public init() {}
     public let name = "sec.audit"
     public let help = "Audit firewall, sharing, listening ports, updates, persistence and security settings"
+    public let keywords = "security secure firewall ports listening sharing malware audit vulnerable safe persistence hacked"
     public var usesWeb: Bool { true }
     public var params: [Param] { [.flag("no_explain", "--no-explain", help: "skip fm explanations (faster, rule text only)")] }
     public var actionSpecs: [any ActionSpec] {

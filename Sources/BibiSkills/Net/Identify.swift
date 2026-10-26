@@ -6,6 +6,7 @@ public struct NetIdentify: Skill {
     public init() {}
     public let name = "net.identify"
     public let help = "Identify a network device from a MAC address, IP address or hostname"
+    public let keywords = "device network ip address mac hostname router identify lan printer who"
     public var aliases: [String] { ["net-identify"] }
     public var usesWeb: Bool { true }
     public var onlineByDefault: Bool { true }
@@ -125,7 +126,7 @@ public struct NetIdentify: Skill {
         let facts = facts(ev)
         let r: Identification
         do {
-            r = try await ctx.model.respond(report, instructions: Self.instructions, schema: Self.schema, as: Identification.self)
+            r = try await ctx.model.respond(report, instructions: ctx.prompts.text("net.identify", default: Self.instructions), schema: Self.schema, as: Identification.self)
         } catch {
             return SkillResult(summary: "fm could not produce an identification: \(error)", observations: evidence.allObservations,
                                facts: facts, notes: ev.problems)

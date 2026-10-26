@@ -75,7 +75,7 @@ public enum Analyze {
         let start = Date()
         do {
             let v = try await ctx.model.respond(describe(node, canDescend: canDescend, policy: ctx.policy),
-                                                instructions: verdictInstructions, schema: verdictSchema, as: Catalog.Verdict.self)
+                                                instructions: ctx.prompts.text("storage.verdict", default: verdictInstructions), schema: verdictSchema, as: Catalog.Verdict.self)
             ctx.reporter.debug(String(format: "  %@ %@  %@/%@ s=%d c=%d (%.1fs) %@",
                                       Paths.short(node.path).padding(toLength: 50, withPad: " ", startingAt: 0),
                                       human(node.size), v.verdict, v.action_type, v.safety, v.confidence,
@@ -154,7 +154,7 @@ public enum Analyze {
             let prompt = "Parent folder: \(Paths.short(node.path)) (\(human(node.size)))\nKnown as: \(ctx.policy.hint(node.path) ?? "unknown")\nItems:\n"
                 + items.joined(separator: "\n")
             do {
-                let r = try await ctx.model.respond(prompt, instructions: consolidateInstructions, schema: consolidateSchema,
+                let r = try await ctx.model.respond(prompt, instructions: ctx.prompts.text("storage.consolidate", default: consolidateInstructions), schema: consolidateSchema,
                                                     as: Consolidate.self)
                 if r.combine {
                     let safety = min(r.safety, inside.map(\.safety).min()!)

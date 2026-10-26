@@ -6,6 +6,7 @@ public struct OptimizeStorage: Skill {
     public init() {}
     public let name = "storage.optimize"
     public let help = "Analyze disk usage and recommend (and run) the top cleanup actions"
+    public let keywords = "cleanup clean free up storage full large big files reclaim space"
     public var aliases: [String] { ["optimize-storage"] }
     public var params: [Param] {
         [

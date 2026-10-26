@@ -1,6 +1,6 @@
 # bibi: parked work
 
-Status as of 2026-10-26. The Swift rewrite, the harness and the web UI are done.
+Status as of 2026-10-26. The Swift rewrite, the harness, the web UI and chat (with the graph store and skill learning) are done.
 Five skills are implemented: `storage.optimize`, `net.identify`, `dev.cleanup`, `sys.health` and `sec.audit`.
 The items below are parked.
 
@@ -41,6 +41,13 @@ To do:
 - Tests for `sec.audit` parsers: `SecParse.firewall`, `lsof -F` and `persistenceFlags` with fixtures.
 - Check the web UI in a real browser: approve, execute, the admin password dialog, undo, and the Changes page.
 - `net.identify` by MAC: macOS hides the ARP table from processes without Local Network permission (sysctl returns 0 bytes). Look into a signed or bundled helper, or document how to grant the permission.
-- Phase 4, chat page:
-  - `POST /api/chat` (currently 501) runs a `LanguageModelSession` with read-only tools (latest report, history/diff, diagnostics).
-  - Proposed changes come back as `BoundAction`s through the existing preview/approve/execute flow.
+
+## Chat and learning: next steps
+
+Chat, the graph store (`bibi.db`) and skill learning shipped. Still open:
+- Check chat in a real browser: streaming replies, approving an admin step (password dialog), dry run, and accepting a candidate from the chat card.
+- Chat with the on-device model is good at single read-only commands and at mapping to registry actions. It is weaker at multi-step plans and sometimes adds unrequested extra steps. Watch the approval statistics on the Skills page and add starter examples (`Sources/BibiCore/Graph/Seeds.swift`) for requests it gets wrong.
+- Retrieval uses skill keywords plus NaturalLanguage sentence embeddings. Embeddings barely separate short requests (cosine 0.3–0.5 for related and unrelated alike), so keywords do most of the work. Let learned skills grow their keywords from their example requests.
+- Facts from compaction are filtered by grounding, but are still noisy. Consider showing remembered facts on the Skills page so they can be deleted.
+- A terminal chat (`bibi chat`) reusing the approval prompt.
+- Chat about a finished run ("explain F3", "undo what you did yesterday") through read-only tools over history and reports.

@@ -51,7 +51,7 @@ struct Common {
 }
 
 struct CLI {
-    let harness = Harness(skills: AllSkills.list) {
+    let harness = Harness(skills: AllSkills.list, graph: try? GraphStore()) {
         if let reason = FoundationModel.unavailableReason() { return UnavailableModel(reason) }
         return FoundationModel()
     }
@@ -68,6 +68,7 @@ struct CLI {
             case "history": return history(rest)
             case "undo": return await undo(rest)
             case "diff": return diff(rest)
+            case "skills": return skills(rest)
             default: break
             }
             if let skill = harness.skill(named: first) { return try await run(skill, rest) }
@@ -94,6 +95,8 @@ struct CLI {
           bibi history [command]         list saved runs; bibi history show <run> for details
           bibi undo <run> [--select 1,2] undo actions taken in a run
           bibi diff <command> [--since]  compare the latest run with an earlier one
+          bibi skills [candidates|show|accept|dismiss|disable|enable <name>]
+                                         the skill tree, statistics and skills learned in chat
         """)
         return 0
     }
@@ -111,7 +114,7 @@ struct CLI {
             print("    \(s.name.padding(toLength: 22, withPad: " ", startingAt: 0)) \(s.help)\(web)\(admin)")
         }
         print("\nRun 'bibi <command> --help' for details. [web] = may contact internet services; [admin] = some actions ask for your password.")
-        print("Also: bibi ui, bibi history, bibi undo, bibi diff")
+        print("Also: bibi ui (chat with bibi there), bibi history, bibi undo, bibi diff, bibi skills")
         return 0
     }
 
@@ -315,6 +318,58 @@ struct CLI {
         if changes.isEmpty { print("  nothing changed") }
         for ch in changes { print("  \(ch.kind == .added ? "+" : ch.kind == .removed ? "-" : "~") \(ch.text)") }
         return 0
+    }
+
+    // MARK: skills learned in chat
+
+    func skills(_ argv: [String]) -> Int32 {
+        guard let graph = harness.graph else {
+            fputs("bibi: \(Paths.bibiHome)/bibi.db could not be opened\n", stderr)
+            return 1
+        }
+        let verb = argv.first ?? "list"
+        switch verb {
+        case "list", "candidates":
+            let all = SkillLibrary.all(graph).filter { verb == "list" || $0.status == "candidate" }
+            if all.isEmpty { print(verb == "list" ? "No skills." : "No candidates. bibi proposes one after the same request works three times in chat.") }
+            for s in all {
+                let st = s.stats
+                let used = "proposed \(st["proposed", default: 0]), approved \(st["approved", default: 0]), skipped \(st["skipped", default: 0])"
+                let status = s.status == "active" ? "" : "  [\(s.status)]"
+                print("  \(s.name.padding(toLength: 28, withPad: " ", startingAt: 0)) \(used)  \(Int(s.approvalRate * 100))%\(status)")
+                if s.source == "learned" { print("  \(String(repeating: " ", count: 28)) \(s.help)") }
+            }
+            return 0
+        case "show":
+            guard argv.count == 2, let n = graph.node(argv[1].hasPrefix("skill:") ? argv[1] : GraphSync.skillID(argv[1])) else {
+                fputs("usage: bibi skills show <name>\n", stderr)
+                return 2
+            }
+            let s = SkillLibrary.view(n, graph: graph)
+            print("\(s.name) (\(s.source), \(s.status))\n\(s.help)")
+            for (i, step) in (s.steps ?? []).enumerated() { print("  \(i + 1). \(step.tool) \(Shell.join(step.args))") }
+            if let p = s.params, !p.isEmpty { print("parameters: " + p.map { "--" + $0 }.joined(separator: " ")) }
+            for e in s.examples ?? [] { print("  asked: \(Text.oneLine(e, max: 100))") }
+            if let g = s.guidance, !g.isEmpty { print("guidance (v\(s.guidanceVersions ?? 1)):\n\(g)") }
+            print("statistics: \(s.stats.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))")
+            return 0
+        case "accept", "dismiss", "disable", "enable":
+            guard argv.count == 2 else {
+                fputs("usage: bibi skills \(verb) <name>\n", stderr)
+                return 2
+            }
+            do {
+                let s = try SkillLibrary.decide(argv[1], verb, graph: graph, harness: harness)
+                print("\(s.name) is now \(s.status)." + (s.status == "active" && s.source == "learned" ? " Run it with: bibi \(s.name) --help" : ""))
+                return 0
+            } catch {
+                fputs("bibi: \(error)\n", stderr)
+                return 1
+            }
+        default:
+            fputs("usage: bibi skills [list|candidates|show <name>|accept|dismiss|disable|enable <name>]\n", stderr)
+            return 2
+        }
     }
 
     // MARK: web

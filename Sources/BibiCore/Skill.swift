@@ -16,15 +16,18 @@ public struct SkillContext: Sendable {
     public var baseline: BaselineInfo?
     public var verbose: Bool
     public var dryRun: Bool
+    /// Model instructions, tunable through the graph (defaults when there is none).
+    public var prompts: PromptBook
 
     public init(model: any LanguageModel, reporter: any Reporter, fetcher: Fetcher = Fetcher(online: false),
-                policy: SafetyPolicy = SafetyPolicy(), baseline: BaselineInfo? = nil, verbose: Bool = false, dryRun: Bool = false) {
+                policy: SafetyPolicy = SafetyPolicy(), baseline: BaselineInfo? = nil, verbose: Bool = false, dryRun: Bool = false,
+                prompts: PromptBook = PromptBook()) {
         self.model = model; self.reporter = reporter; self.fetcher = fetcher; self.policy = policy
-        self.baseline = baseline; self.verbose = verbose; self.dryRun = dryRun
+        self.baseline = baseline; self.verbose = verbose; self.dryRun = dryRun; self.prompts = prompts
     }
 
     public var online: Bool { fetcher.online }
-    public var explainer: Explainer { Explainer(model: model, reporter: reporter) }
+    public var explainer: Explainer { Explainer(model: model, reporter: reporter, prompts: prompts) }
 
     /// Changes since the baseline run, if there is one.
     public func diff(_ facts: [String: JSONValue], spec: FactsSpec) -> FactDiff? {
@@ -37,6 +40,8 @@ public protocol Skill: Sendable {
     var name: String { get }
     var help: String { get }
     var aliases: [String] { get }
+    /// Words that suggest a request is for this skill (chat retrieval; stored in the graph, where they can be tuned).
+    var keywords: String { get }
     /// True if the skill can send data to internet services (shown as [web]).
     var usesWeb: Bool { get }
     /// net.identify is useless offline, so it defaults to online; everything else defaults to offline.
@@ -54,6 +59,7 @@ public protocol Skill: Sendable {
 
 extension Skill {
     public var aliases: [String] { [] }
+    public var keywords: String { "" }
     public var usesWeb: Bool { false }
     public var onlineByDefault: Bool { false }
     public var factsSpec: FactsSpec { FactsSpec() }

@@ -1,0 +1,548 @@
+import Foundation
+
+/// Where chat sends what happens: (type, text). Types: message (a ChatMessage as JSON), delta (the reply so far),
+/// candidate (a learned-skill candidate as JSON), progress/info/ok/error/heading (from running steps).
+public typealias ChatEmit = @Sendable (_ type: String, _ text: String) -> Void
+
+/// The user's decisions on a proposal.
+public struct ChatDecision: Sendable {
+    public var approve: [String]
+    public var skip: [String]
+    public var reason: String?
+    public var adminConfirmed: Bool
+    public var dryRun: Bool
+
+    public init(approve: [String], skip: [String] = [], reason: String? = nil, adminConfirmed: Bool = false, dryRun: Bool = false) {
+        self.approve = approve; self.skip = skip; self.reason = reason; self.adminConfirmed = adminConfirmed; self.dryRun = dryRun
+    }
+}
+
+/// "Chat with bibi": the generic skill. Each conversation is a run (skill `chat`) whose proposals are findings with
+/// recommendations, so approval, execution, the journal, undo and history work exactly as for other runs.
+///
+/// One turn: retrieve skills, examples and facts from the graph → ask the model for a reply and steps → turn steps
+/// into actions bibi's rules have checked → wait for approval → run → answer from the results → compact the
+/// conversation → record statistics → maybe draft a learned skill.
+public final class ChatEngine: Sendable {
+    public let harness: Harness
+    public let graph: GraphStore
+    let embedder: any Embedder
+    /// Characters of prompt per turn (the on-device model has ~4k tokens for instructions, prompt, schema and answer).
+    let budget: Int
+    /// Messages kept verbatim; older ones are compacted into the summary.
+    public static let keepMessages = 4
+
+    public init(harness: Harness, graph: GraphStore, embedder: any Embedder = SentenceEmbedder(), budget: Int = 6000) {
+        self.harness = harness; self.graph = graph; self.embedder = embedder; self.budget = budget
+    }
+
+    var prompts: PromptBook { PromptBook(graph) }
+
+    static let systemInstructions = """
+    You are bibi, an assistant running on the user's Mac. You answer questions about this Mac and do things on it.
+    You cannot see the Mac yourself. To find something out or change something, propose steps: the user approves them, they run, and you get their results.
+    steps: when the answer depends on this Mac (disk, versions, processes, settings, files, network) and it isn't in the results above, list the steps that find out or make the change, at most 4. Proposing steps is how you ask permission: never say you can't check, and never guess the state of the Mac.
+    Usually one or two steps are enough; only include steps that serve this request. For a quick fact (free space, versions, what is running, a setting), one read-only command is best. Skills are slow, thorough analyses: use one only when the user wants a full check or cleanup. Use a listed action when it does exactly what was asked; otherwise use tool command. Never propose a change the user didn't ask for.
+    No steps: when you can answer from the conversation and results, or to ask one short question when the request is ambiguous. Never invent command output or numbers.
+    For a command, args is the program and then each argument separately, like ["df", "-h"]. There is no shell: no pipes, redirections, ; or &&, no $(...). Use absolute paths or ~. Start with sudo only when administrator rights are needed. Prefer read-only commands. Deleted files go to the Trash.
+    reply: short and plain. When proposing, say what the steps will do. When answering from results, give the numbers that matter.
+    """
+
+    static let compactInstructions = """
+    You keep the running summary of a conversation between a user and bibi, an assistant on their Mac.
+    summary: the old summary updated with the new messages, at most 120 words: what the user wants, what ran, what was found, what is still open.
+    Only write what the summary and messages say; add nothing else.
+    facts: durable facts about this Mac or the user that a command result or the user stated in these messages, at most five, each copied closely from the message. None if there are none.
+    """
+
+    /// Registry actions offered in every chat, with how to fill their parameters.
+    static let actionHints: [String: String] = [
+        "trash_path": "path=/absolute/path",
+        "reveal": "path=/absolute/path",
+        "open_url": "url=https://...",
+        "open_settings_pane": "pane=" + OpenSettingsPane.panes.keys.sorted().joined(separator: "|"),
+        "tool_cleanup": "tool=" + Tools.commands.keys.sorted().joined(separator: "|"),
+    ]
+
+    static func turnSchema(_ tools: [String]) -> Schema {
+        Schema("ChatTurn", [
+            .init("intent", .string, "a short phrase for what the user wants, like 'check free disk space'"),
+            .init("steps", .array(.object(Schema("Step", [
+                .init("tool", .choice(tools)),
+                .init("args", .array(.string, max: 16), "command: the program, then each argument; action: key=value; skill: its options"),
+                .init("purpose", .string, "a few words: why this step"),
+            ])), max: 4), "empty when you can answer without running anything"),
+            .init("reply", .string, "with steps: one sentence on what they will check or do (their results aren't known yet); without steps: your answer"),
+        ])
+    }
+
+    static let answerSchema = Schema("ChatAnswer", [
+        .init("intent", .string, "a short phrase for what the user wanted"),
+        .init("reply", .string, "your answer from the results"),
+    ])
+
+    static let compactSchema = Schema("Compact", [
+        .init("summary", .string, "at most 120 words"),
+        .init("facts", .array(.object(Schema("Fact", [.init("subject", .string, "a few words"), .init("statement", .string, "one sentence")])), max: 5)),
+    ])
+
+    // MARK: conversations
+
+    public func start() throws -> RunRecord {
+        let run = try harness.store.create(skill: "chat", args: [], online: false, version: Bibi.version)
+        run.save(SkillResult(summary: "New chat"))
+        run.saveFile("chat.json", ChatState(id: run.id, title: "New chat"))
+        graph.upsert(GraphNode(id: "conversation:" + run.id, kind: "conversation", name: "New chat"))
+        return run
+    }
+
+    public func conversations() -> [RunRecord] { harness.store.list(skill: "chat") }
+
+    public func state(_ run: RunRecord) -> ChatState {
+        run.loadFile("chat.json", ChatState.self) ?? ChatState(id: run.id, title: run.meta.summary ?? "Chat")
+    }
+
+    public func transcript(_ run: RunRecord) -> [ChatMessage] { run.lines("transcript.jsonl", ChatMessage.self) }
+
+    func save(_ run: RunRecord, _ state: ChatState) { run.saveFile("chat.json", state) }
+
+    func say(_ run: RunRecord, _ state: inout ChatState, _ m: ChatMessage, _ emit: ChatEmit) {
+        run.appendLine("transcript.jsonl", m)
+        state.recent.append(m)
+        emit("message", JSON.string(m))
+    }
+
+    func model(_ run: RunRecord) -> any LanguageModel { RecordingModel(harness.model) { run.model($0) } }
+
+    // MARK: a user message
+
+    public func send(_ run: RunRecord, _ text: String, emit: @escaping ChatEmit) async {
+        var state = state(run)
+        let question = Text.clip(text.trimmingCharacters(in: .whitespacesAndNewlines), max: 2000)
+        guard !question.isEmpty else { return }
+        if state.turns == 0 {
+            state.title = Text.oneLine(question, max: 60)
+            var report = run.report() ?? SkillResult(summary: state.title)
+            report.summary = state.title
+            run.save(report)
+            graph.update("conversation:" + run.id) { $0.name = state.title }
+        }
+        state.turns += 1
+        state.results = []
+        state.pending = nil
+        say(run, &state, ChatMessage("user", question), emit)
+        await think(run, &state, question: question, emit: emit)
+        await compact(run, &state)
+        save(run, state)
+    }
+
+    /// One model turn. `question` is nil for the follow-up that answers from results.
+    func think(_ run: RunRecord, _ state: inout ChatState, question: String?, emit: @escaping ChatEmit) async {
+        let focus = question ?? state.recent.last(where: { $0.role == "user" })?.text ?? ""
+        let v = embedder.vector(focus)
+        let skills = rankSkills(focus, v)
+        let tools = toolCatalog(skills)
+
+        var ctx = ContextBuilder()
+        ctx.add("Tools", tools.text, priority: 0, maxChars: 2500)
+        ctx.add("Conversation so far", state.summary, priority: 3, maxChars: 1200)
+        ctx.add("Known facts", facts(focus, v), priority: 4, maxChars: 600)
+        if question != nil {
+            ctx.add("Examples of requests and the steps that answered them", examples(focus), priority: 1, maxChars: 700)
+        }
+        ctx.add("Recent messages", recentText(state, dropLastUser: question != nil), priority: 2, maxChars: 2000)
+        ctx.add("Results of the steps the user approved", state.results.joined(separator: "\n\n"), priority: 0, maxChars: 2500)
+        ctx.add(question == nil ? "Task" : "User",
+                question ?? "Answer the user's last request from these results, with the numbers that matter. If they don't answer it, say what is missing.",
+                priority: 0)
+
+        let generic = prompts.active("skill.generic", default: "")
+        let system = prompts.text("chat.system", default: Self.systemInstructions)
+        let instructions = generic.text.isEmpty ? system : system + "\n" + generic.text
+        // After results, only answer: a small model asked to answer and plan at once re-proposes instead of answering.
+        let schema = question == nil ? Self.answerSchema : Self.turnSchema(tools.ids)
+        let model = model(run)
+        var budget = self.budget, answer: JSONValue?
+        for _ in 0..<4 {
+            do {
+                answer = try await model.stream(ctx.build(budget: budget).text, instructions: instructions, schema: schema) { partial in
+                    if let r = partial["reply"]?.string, !r.isEmpty { emit("delta", r) }
+                }
+                break
+            } catch let e as LLMError where e.contextOverflow {
+                budget = budget * 2 / 3
+            } catch {
+                say(run, &state, ChatMessage("note", "The model failed: \(error)"), emit)
+                return
+            }
+        }
+        guard let answer else {
+            say(run, &state, ChatMessage("note", "This doesn't fit the model's context even when shortened; start a new chat."), emit)
+            return
+        }
+
+        let phrase = (answer["intent"]?.string ?? "").ifEmpty(Text.oneLine(focus, max: 80))
+        let steps: [PlannedStep] = (answer["steps"]?.array ?? []).compactMap { s in
+            guard let tool = s["tool"]?.string else { return nil }
+            return PlannedStep(tool: tool, args: s["args"]?.strings ?? [], purpose: s["purpose"]?.string ?? "")
+        }
+        var reply = (answer["reply"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let question {
+            let id = "intent:\(run.id)-\(state.turns)"
+            graph.upsert(GraphNode(id: id, kind: "intent", name: phrase, text: question,
+                                   props: ["question": .string(question), "intent": .string(phrase), "conversation": .string(run.id)]))
+            if let iv = embedder.vector(phrase) { graph.setVector(id, iv) }
+            graph.link("conversation:" + run.id, id, "contains")
+            graph.record("asked", node: id, conversation: run.id)
+            state.intent = id
+        }
+
+        var finding: String?, refusedAll = false
+        if !steps.isEmpty {
+            let planner = Planner(registry: harness.registry, env: harness.env(admin: NoAdminRunner(), reporter: SilentReporter()),
+                                  skill: { [harness] in harness.skill(named: $0) })
+            var plan = planner.bind(steps)
+            // Steps already proposed in this chat (run or skipped) aren't offered again.
+            let earlier = Set((run.report()?.actions ?? []).map { JSON.string($0.call) })
+            plan.actions.removeAll { earlier.contains(JSON.string($0.call)) }
+            if !plan.actions.isEmpty {
+                finding = addProposal(run, title: phrase, explanation: reply, actions: plan.actions)
+                state.pending = finding
+                let owner = owner(of: steps)
+                let g = prompts.active("skill." + (graph.node(owner)?.name ?? "generic"), default: guidanceDefault(owner))
+                state.skill = owner
+                state.guidance = g.version.isEmpty ? nil : g.version
+                graph.record("proposed", node: owner, conversation: run.id)
+                if let gv = state.guidance { graph.record("proposed", node: gv, conversation: run.id) }
+            }
+            refusedAll = plan.actions.isEmpty && !plan.refusals.isEmpty
+            if !plan.refusals.isEmpty {
+                let why = plan.refusals.map { "- " + $0 }.joined(separator: "\n")
+                if plan.actions.isEmpty { reply = reply.isEmpty ? "I couldn't propose anything runnable." : reply }
+                say(run, &state, ChatMessage("note", "bibi won't run some of the proposed steps:\n" + why), emit)
+            }
+        }
+        if refusedAll {
+            reply = "I couldn't turn that into steps bibi can run."
+        } else if finding != nil && (Self.claimsResults(reply, question: focus) || !Self.readsAsPlan(reply)) {
+            // The model sometimes answers as if the steps had already run; nothing has run yet.
+            reply = "I'll check with the step(s) below."
+        }
+        if reply.isEmpty { reply = finding == nil ? "I don't have an answer for that." : "Here is what I'd run." }
+        say(run, &state, ChatMessage("bibi", reply, finding: finding), emit)
+    }
+
+    /// A reply sent with a proposal should say what will happen, not what was found.
+    public static func readsAsPlan(_ reply: String) -> Bool {
+        let r = reply.lowercased().replacingOccurrences(of: "’", with: "'")
+        return ["i'll", "i will", "let me", "i can", "i'm going", "i am going", "i'd", "i would", "to ", "checking", "running",
+                "here", "this will", "these steps", "the steps", "first"].contains { r.hasPrefix($0) }
+    }
+
+    /// True if a reply written before any step ran states numbers or fills in placeholders like "[version]".
+    public static func claimsResults(_ reply: String, question: String) -> Bool {
+        let numbers = { (t: String) in Set(Re.all("[0-9]+(?:[.,][0-9]+)?", t).compactMap(\.first)) }
+        return !numbers(reply).subtracting(numbers(question)).isEmpty || Re.test("\\[[A-Za-z ]+\\]", reply)
+    }
+
+    /// Adds a proposal to the chat run's report and returns its finding id.
+    func addProposal(_ run: RunRecord, title: String, explanation: String, actions: [BoundAction], cites: [String] = []) -> String {
+        var report = run.report() ?? SkillResult(summary: title)
+        let fid = "F\(report.findings.count + 1)"
+        var n = report.actions.count
+        let numbered = actions.map { a -> BoundAction in
+            n += 1
+            var a = a
+            a.id = "a\(n)"
+            a.findingID = fid
+            return a
+        }
+        report.findings.append(Finding(id: fid, category: "chat", title: title, severity: .info, observationIDs: cites,
+                                       confidence: 70, explanation: explanation, recommendations: numbered))
+        run.save(report)
+        return fid
+    }
+
+    /// The skill node a proposal belongs to (for statistics): the skill it runs, the skill owning its action, or generic.
+    func owner(of steps: [PlannedStep]) -> String {
+        for s in steps {
+            if s.tool.hasPrefix("skill:") { return GraphSync.skillID(String(s.tool.dropFirst(6))) }
+            if s.tool.hasPrefix("action:"), let src = graph.edges(to: "action:" + s.tool.dropFirst(7), kind: "uses").first?.src { return src }
+        }
+        return GraphSync.root
+    }
+
+    func guidanceDefault(_ skillNode: String) -> String {
+        skillNode == GraphSync.root ? "" : harness.skill(named: graph.node(skillNode)?.name ?? "")?.help ?? ""
+    }
+
+    // MARK: retrieval
+
+    /// Skills whose keywords or description share words with the request, ranked by those hits plus embedding
+    /// similarity, weighted by how often their proposals were approved. Skills that match nothing aren't offered:
+    /// a small model picks a listed skill too eagerly.
+    func rankSkills(_ text: String, _ v: [Float]?, limit: Int = 3) -> [GraphNode] {
+        graph.nodes(kind: "skill", status: "active").filter { $0.id != GraphSync.root && harness.skill(named: $0.name) != nil }
+            .compactMap { n -> (GraphNode, Double)? in
+                let hits = Similarity.hits(text, (n.props["keywords"]?.string ?? "") + " " + n.text)
+                guard hits > 0 else { return nil }
+                var nv = graph.vector(n.id)
+                if nv == nil, let x = embedder.vector(n.text) { graph.setVector(n.id, x); nv = x }
+                let sim = nv.flatMap { a in v.map { Similarity.cosine(a, $0) } } ?? 0
+                return (n, (Double(hits) + sim) * (0.5 + 0.5 * graph.approvalRate(n.id)))
+            }
+            .sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
+    }
+
+    func toolCatalog(_ skills: [GraphNode]) -> (ids: [String], text: String) {
+        var ids: [String] = [], lines: [String] = []
+        for n in skills {
+            guard let s = harness.skill(named: n.name) else { continue }
+            ids.append("skill:" + s.name)
+            let guidance = prompts.text("skill." + s.name, default: s.help)
+            lines.append("- skill:\(s.name) (thorough, takes a minute): \(Text.oneLine(guidance, max: 300)) \(GraphSync.example(s.params))")
+        }
+        for (id, hint) in Self.actionHints.sorted(by: { $0.key < $1.key }) {
+            guard let spec = harness.registry.spec(id) else { continue }
+            ids.append("action:" + id)
+            lines.append("- action:\(id) \(hint): \(spec.summary)")
+        }
+        ids.append("command")
+        lines.append(#"- command: any program; args = the program, then each argument. Examples: ["df", "-h", "/"] free disk space; ["sw_vers"] macOS version; ["ps", "-Ao", "pid,%cpu,%mem,comm", "-m"] processes by memory; ["du", "-sh", "~/Downloads"] folder size"#)
+        return (ids, lines.joined(separator: "\n"))
+    }
+
+    /// Up to three requests that worked (learned or seeded) sharing words with this one, best first; learned
+    /// ones win ties and frequently matched ones rank higher.
+    func examples(_ text: String) -> String {
+        let terms = Similarity.terms(text)
+        let ranked = graph.nodes(kind: "intent").filter { $0.props["outcome"]?.string == "ok" }
+            .compactMap { n -> (GraphNode, Double)? in
+                let hits = terms.intersection(Similarity.terms(n.text)).count
+                guard hits > 0 else { return nil }
+                let used = graph.edges(from: n.id, kind: "matched").reduce(0) { $0 + $1.weight }
+                return (n, Double(hits) + (n.props["seed"] == nil ? 0.5 : 0) + min(1, used / 10))
+            }
+            .sorted { $0.1 > $1.1 }
+        var seen = Set<String>(), lines: [String] = []
+        for (n, _) in ranked where lines.count < 3 && seen.insert(n.text.lowercased()).inserted {
+            let steps = SkillMiner.steps(n).map { "\($0.tool) " + JSON.string($0.args) }.joined(separator: "; ")
+            lines.append("\"\(Text.oneLine(n.text, max: 100))\" → \(steps)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    func facts(_ text: String, _ v: [Float]?) -> String {
+        var seen = Set<String>()
+        let pool = (graph.search(text, kind: "fact", limit: 10) + graph.nodes(kind: "fact").prefix(40)).filter { seen.insert($0.id).inserted }
+        return pool.map { ($0, Similarity.score(text, v, $0.name + " " + $0.text, graph.vector($0.id))) }
+            .filter { $0.1 >= 0.35 }.sorted { $0.1 > $1.1 }.prefix(3)
+            .map { "- \($0.0.text) (\(ago($0.0.updated)))" }.joined(separator: "\n")
+    }
+
+    func recentText(_ state: ChatState, dropLastUser: Bool) -> String {
+        var msgs = state.recent
+        if dropLastUser, msgs.last?.role == "user" { msgs.removeLast() }
+        return msgs.map { m in
+            let who = ["user": "User", "bibi": "bibi", "result": "Result", "note": "Note"][m.role] ?? m.role
+            return "\(who): " + Text.clip(m.text, max: m.role == "result" ? 300 : 600)
+        }.joined(separator: "\n")
+    }
+
+    // MARK: decisions
+
+    /// Records the user's decisions, runs what was approved (through the harness: validation, journal, admin
+    /// confirmation), then lets the model answer from the results and learns from what worked.
+    public func decide(_ run: RunRecord, _ d: ChatDecision, admin: any AdminRunner, emit: @escaping ChatEmit) async throws -> [ExecResult] {
+        var state = state(run)
+        guard let report = run.report() else { throw ActionError("this chat has no proposals") }
+        let done = Set(run.journalEntries.filter { $0.event == .executed }.compactMap(\.actionID))
+        // Only the latest proposal can be decided; a new message supersedes older ones.
+        let open = Set(report.findings.first { $0.id == state.pending }?.recommendations.map(\.id) ?? [])
+        for id in d.approve + d.skip where !open.contains(id) {
+            throw ActionError(report.action(id) == nil ? "unknown action \(id)" : "\(id) belongs to an earlier proposal; ask again")
+        }
+        let approved = try d.approve.map { id -> BoundAction in
+            guard let a = report.action(id) else { throw ActionError("unknown action \(id)") }
+            guard !done.contains(id) else { throw ActionError("\(a.title) already ran") }
+            return a
+        }
+        let skipped = d.skip.compactMap(report.action)
+        let owner = state.skill ?? GraphSync.root
+        let skillName = graph.node(owner)?.name ?? "generic"
+
+        if !d.dryRun {
+            for _ in approved { record("approved", owner, state, run) }
+        }
+        for a in skipped {
+            record("skipped", owner, state, run)
+            say(run, &state, ChatMessage("note", "Skipped: \(a.title)", actionID: a.id), emit)
+        }
+        if let reason = d.reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty, !skipped.isEmpty {
+            prompts.addAvoid("skill." + skillName, default: guidanceDefault(owner), note: reason)
+            say(run, &state, ChatMessage("note", "Noted for next time: \(Text.oneLine(reason, max: 160))"), emit)
+        }
+
+        let reporter = ChatReporter(emit: emit)
+        let env = harness.env(admin: admin, reporter: reporter)
+        var results = await harness.execute(approved.filter { $0.call.spec != "run_skill" }, run: run, env: env,
+                                            adminConfirmed: d.adminConfirmed, dryRun: d.dryRun, frontend: "chat")
+        var next: String?
+        for a in approved where a.call.spec == "run_skill" {
+            let (r, fid) = await runSkill(a, run, dryRun: d.dryRun, reporter: reporter)
+            results.append(r)
+            if let fid { next = fid }
+        }
+
+        for r in results {
+            let output = r.output.map { "\n" + Text.clip($0, max: 4000) } ?? ""
+            say(run, &state, ChatMessage("result", "\(r.title): \(r.message)\(output)", actionID: r.actionID, ok: r.ok), emit)
+            if !d.dryRun { graph.record(r.ok ? "executed" : "failed", node: owner, conversation: run.id) }
+        }
+        state.results = results.map { r in
+            "\(r.ok ? "OK" : "FAILED") \(r.title): \(r.message)" + (r.output.map { "\n" + Text.clip($0, max: 1500) } ?? "")
+        }
+        if let pending = state.pending, let f = run.report()?.findings.first(where: { $0.id == pending }) {
+            let decided = Set(d.approve + d.skip).union(done)
+            if f.recommendations.allSatisfy({ decided.contains($0.id) }) { state.pending = nil }
+        }
+        if let next { state.pending = next }
+
+        if !d.dryRun, let intent = state.intent {
+            let worked = approved.filter { a in results.contains { $0.actionID == a.id && $0.ok } }.map(PlannedStep.from)
+            if !worked.isEmpty {
+                await learn(intent, worked, owner: owner, run: run, state: &state, emit: emit)
+            }
+        }
+        prompts.evaluate("skill." + skillName)
+
+        if !d.dryRun && !results.isEmpty {
+            await think(run, &state, question: nil, emit: emit)
+            state.results = []
+        }
+        await compact(run, &state)
+        save(run, state)
+        return results
+    }
+
+    func record(_ kind: String, _ owner: String, _ state: ChatState, _ run: RunRecord) {
+        graph.record(kind, node: owner, conversation: run.id)
+        if let g = state.guidance { graph.record(kind, node: g, conversation: run.id) }
+    }
+
+    /// Runs a skill the user approved from chat. Its summary becomes evidence; its recommendations come back as
+    /// a new proposal in this chat (so they need their own approval). Returns that proposal's id.
+    func runSkill(_ a: BoundAction, _ run: RunRecord, dryRun: Bool, reporter: any Reporter) async -> (ExecResult, String?) {
+        let name = a.call.params["skill"] ?? "", argv = CommandPolicy.decode(a.call.params["argv"] ?? "[]") ?? []
+        func fail(_ m: String) -> (ExecResult, String?) {
+            run.journal(JournalEntry(.failed, actionID: a.id, title: a.title, call: a.call, error: m, frontend: "chat"))
+            return (ExecResult(actionID: a.id, title: a.title, ok: false, message: m, reversible: false), nil)
+        }
+        guard let skill = harness.skill(named: name) else { return fail("unknown skill \(name)") }
+        run.journal(JournalEntry(.selected, actionID: a.id, title: a.title, call: a.call, frontend: "chat"))
+        if dryRun {
+            let m = "[dry-run] would run bibi \(name) \(Shell.join(argv))"
+            run.journal(JournalEntry(.dryRun, actionID: a.id, title: a.title, call: a.call, message: m, frontend: "chat"))
+            return (ExecResult(actionID: a.id, title: a.title, ok: true, message: m, reversible: false), nil)
+        }
+        do {
+            let (child, result) = try await harness.run(skill, argv: argv, reporter: reporter)
+            guard var report = run.report() else { return fail("the chat report is missing") }
+            let oid = "o\(report.observations.count + 1)"
+            let top = result.findings.prefix(5).map { "- [\($0.severity.rawValue)] \($0.title): \(Text.oneLine($0.explanation, max: 200))" }
+            let text = ([result.summary] + top).joined(separator: "\n")
+            report.observations.append(Observation(id: oid, source: "bibi \(name) (run \(child.id))", text: text))
+            run.save(report)
+            var message = "ran \(name) (run \(child.id))"
+            var fid: String?
+            let recs = Array(result.actions.prefix(6))
+            if !recs.isEmpty {
+                fid = addProposal(run, title: "Recommendations from \(name)", explanation: result.summary, actions: recs, cites: [oid])
+                message += "; \(recs.count) recommendation(s) to review"
+            }
+            run.journal(JournalEntry(.executed, actionID: a.id, title: a.title, call: a.call, message: message, frontend: "chat"))
+            return (ExecResult(actionID: a.id, title: a.title, ok: true, message: message, reversible: false, output: text), fid)
+        } catch {
+            return fail("\(error)")
+        }
+    }
+
+    /// Remembers what worked for this request and drafts a skill when the same request keeps coming back.
+    func learn(_ intent: String, _ worked: [PlannedStep], owner: String, run: RunRecord, state: inout ChatState,
+               emit: @escaping ChatEmit) async {
+        graph.update(intent) { n in
+            let steps = SkillMiner.steps(n) + worked
+            n.props["outcome"] = .string("ok")
+            n.props["steps"] = (try? JSON.decode(JSONValue.self, from: JSON.string(steps))) ?? .array([])
+            n.props["signature"] = .string(steps.map(\.signature).joined(separator: ">"))
+        }
+        graph.strengthen(intent, owner, "matched")
+        graph.strengthen(owner, intent, "example")
+        let miner = SkillMiner(graph: graph, model: model(run), prompts: prompts)
+        guard let c = await miner.observe(intent) else { return }
+        state.candidates.append(c.id)
+        let size = c.props["size"]?.int ?? SkillMiner.minOccurrences
+        emit("candidate", JSON.string(SkillLibrary.view(c, graph: graph)))
+        say(run, &state, ChatMessage("note", "You've asked for this \(size) times. I can keep it as a skill, \"\(c.name)\": "
+                                     + (c.props["help"]?.string ?? "") + " Accept it under Skills, or here."), emit)
+    }
+
+    // MARK: compaction
+
+    /// Folds messages older than the last few into the summary and stores durable facts in the graph.
+    func compact(_ run: RunRecord, _ state: inout ChatState) async {
+        guard state.recent.count > Self.keepMessages else { return }
+        let old = state.recent.dropLast(Self.keepMessages)
+        state.recent = Array(state.recent.suffix(Self.keepMessages))
+        let lines = old.map { m in
+            "\(["user": "User", "bibi": "bibi", "result": "Result", "note": "Note"][m.role] ?? m.role): \(Text.clip(m.text, max: 500))"
+        }.joined(separator: "\n")
+        let prompt = "Summary so far:\n\(state.summary.ifEmpty("(none)"))\n\nNew messages:\n\(lines)"
+        if let r = try? await model(run).respond(prompt, instructions: prompts.text("chat.compact", default: Self.compactInstructions),
+                                                 schema: Self.compactSchema),
+           let s = r["summary"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
+            state.summary = Text.clip(s, max: 1200)
+            let source = lines + "\n" + state.summary
+            for f in r["facts"]?.array ?? [] {
+                if let subject = f["subject"]?.string, let statement = f["statement"]?.string, Self.grounded(statement, in: source) {
+                    remember(subject, statement, conversation: run.id)
+                }
+            }
+        } else {
+            state.summary = String((state.summary + "\n" + lines).suffix(1200))
+        }
+    }
+
+    /// A fact is kept only if it is a sentence about the Mac or the user (not a request or a plan) whose numbers
+    /// and most of whose words appear in what was said: the model embellishes and copies fragments.
+    public static func grounded(_ statement: String, in source: String) -> Bool {
+        let numbers = { (t: String) in Set(Re.all("[0-9]+(?:[.,][0-9]+)?", t).compactMap(\.first)) }
+        let words = Similarity.terms(statement)
+        let lower = statement.lowercased()
+        guard words.count >= 3, statement.split(separator: " ").count >= 4,
+              !["i'll", "i will", "result:", "the user asked", "user asked", "bibi will", "bibi"].contains(where: { lower.hasPrefix($0) }),
+              numbers(statement).isSubset(of: numbers(source)) else { return false }
+        return Double(words.intersection(Similarity.terms(source)).count) / Double(words.count) >= 0.6
+    }
+
+    func remember(_ subject: String, _ statement: String, conversation: String) {
+        // One fact per subject: a newer statement (e.g. free space today) replaces the older one.
+        let id = "fact:" + Hashing.short(Similarity.terms(subject).sorted().joined(separator: " "))
+        graph.upsert(GraphNode(id: id, kind: "fact", name: Text.oneLine(subject, max: 80), text: Text.oneLine(statement, max: 300),
+                               props: ["conversation": .string(conversation)]))
+        if let v = embedder.vector(subject + " " + statement) { graph.setVector(id, v) }
+        graph.link(id, "conversation:" + conversation, "from")
+    }
+}
+
+/// Sends progress from running steps to the chat.
+struct ChatReporter: Reporter {
+    let emit: ChatEmit
+    func progress(_ m: String) { emit("progress", m) }
+    func info(_ m: String) { emit("info", m) }
+    func debug(_: String) {}
+    func ok(_ m: String) { emit("ok", m) }
+    func error(_ m: String) { emit("error", m) }
+    func heading(_ m: String) { emit("heading", m) }
+}

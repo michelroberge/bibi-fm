@@ -76,3 +76,23 @@ public enum IPv4 {
         return v >> 24 == 10 || v >> 20 == 0xAC1 || v >> 16 == 0xC0A8 || v >> 16 == 0xA9FE || v >> 24 == 127
     }
 }
+
+public enum Text {
+    /// Collapses whitespace and cuts to `max` characters with an ellipsis.
+    public static func oneLine(_ s: String, max: Int) -> String {
+        let flat = s.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return flat.count > max ? String(flat.prefix(max - 1)) + "…" : flat
+    }
+
+    /// Keeps the start and end of long output (where commands usually put headers and totals).
+    public static func clip(_ s: String, max: Int) -> String {
+        guard s.count > max else { return s }
+        let head = s.prefix(max * 2 / 3), tail = s.suffix(max / 3)
+        return head + "\n… (\(s.count - max) characters cut) …\n" + tail
+    }
+
+    /// Lowercase words joined by dashes, for ids and names.
+    public static func slug(_ s: String, maxWords: Int = 4) -> String {
+        Similarity.tokens(s).filter { !Similarity.stopwords.contains($0) }.prefix(maxWords).joined(separator: "-").ifEmpty("skill")
+    }
+}

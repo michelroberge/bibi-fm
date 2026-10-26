@@ -34,12 +34,33 @@ public struct FoundationModel: LanguageModel {
                 return try JSON.decode(JSONValue.self, from: content.jsonString)
             } catch let e as LanguageModelSession.GenerationError {
                 last = "\(e.localizedDescription)"
-                if case .exceededContextWindowSize = e { break }
+                if case .exceededContextWindowSize = e { throw LLMError("fm: \(last)", contextOverflow: true) }
             } catch {
                 last = "\(error)"
             }
         }
         throw LLMError("fm failed: \(last)")
+    }
+
+    public func stream(_ prompt: String, instructions: String, schema: Schema,
+                       partial: @escaping @Sendable (JSONValue) -> Void) async throws -> JSONValue {
+        let generation = try GenerationSchema(root: Self.dynamic(schema), dependencies: [])
+        do {
+            let json = try await withTimeout(timeout) {
+                let session = LanguageModelSession(instructions: instructions)
+                var last = ""
+                for try await snapshot in session.streamResponse(to: prompt, schema: generation,
+                                                                 options: GenerationOptions(sampling: .greedy)) {
+                    last = snapshot.content.jsonString
+                    if let v = try? JSON.decode(JSONValue.self, from: last) { partial(v) }
+                }
+                return last
+            }
+            return try JSON.decode(JSONValue.self, from: json)
+        } catch let e as LanguageModelSession.GenerationError {
+            if case .exceededContextWindowSize = e { throw LLMError("fm: \(e.localizedDescription)", contextOverflow: true) }
+            throw LLMError("fm failed: \(e.localizedDescription)")
+        }
     }
 
     static func dynamic(_ schema: Schema) -> DynamicGenerationSchema {

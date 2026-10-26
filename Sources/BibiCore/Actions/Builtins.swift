@@ -5,6 +5,7 @@ public enum Builtins {
     public static let all: [any ActionSpec] = [
         TrashPath(), RestorePath(), ClearRegenerableDir(), EmptyTrash(), ToolCleanup(), Reveal(), OpenURL(),
         OpenSettingsPane(), RunDiagnostic(admin: false), RunDiagnostic(admin: true),
+        RunCommand(admin: false), RunCommand(admin: true), RunSkillSpec(),
     ]
 }
 

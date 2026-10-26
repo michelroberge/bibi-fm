@@ -24,28 +24,52 @@ public struct ExecResult: Codable, Sendable {
 /// Runs skills, saves history, previews, executes and undoes actions. Shared by the terminal and the web UI
 /// so both enforce the same rules and write the same audit trail.
 public final class Harness: Sendable {
+    /// Built-in skills (compiled in).
     public let skills: [String: any Skill]
     public let registry: ActionRegistry
     public let store: RunStore
     public let policy: SafetyPolicy
+    /// bibi.db: skill tree, prompts, statistics and learned skills. nil = none (tests, or if it can't be opened).
+    public let graph: GraphStore?
     let makeModel: @Sendable () -> any LanguageModel
+    /// Skills learned in chat and accepted by the user; reloaded when one is accepted or disabled.
+    private let learned = Mutex<[String: any Skill]>([:])
 
     public init(skills: [any Skill], store: RunStore = RunStore(), policy: SafetyPolicy = SafetyPolicy(),
-                model: @escaping @Sendable () -> any LanguageModel) {
+                graph: GraphStore? = nil, model: @escaping @Sendable () -> any LanguageModel) {
         var d: [String: any Skill] = [:]
         for s in skills { d[s.name] = s }
         self.skills = d
         self.registry = ActionRegistry(Builtins.all + skills.flatMap(\.actionSpecs))
         self.store = store
         self.policy = policy
+        self.graph = graph
         self.makeModel = model
+        if let graph {
+            GraphSync.syncBuiltins(graph, skills: skills, registry: registry)
+            reloadLearned()
+        }
     }
+
+    public var model: any LanguageModel { makeModel() }
+    public var prompts: PromptBook { PromptBook(graph) }
+
+    /// Re-reads the active learned skills from the graph.
+    public func reloadLearned() {
+        guard let graph else { return }
+        let list = GraphSkill.active(in: graph, registry: registry).filter { skills[$0.name] == nil }
+        learned.withLock { $0 = Dictionary(list.map { ($0.name, $0 as any Skill) }, uniquingKeysWith: { a, _ in a }) }
+    }
+
+    /// Built-in and learned skills.
+    public var allSkills: [String: any Skill] { skills.merging(learned.withLock { $0 }) { a, _ in a } }
 
     public func skill(named name: String) -> (any Skill)? {
-        skills[name] ?? skills.values.first { $0.aliases.contains(name) }
+        let all = allSkills
+        return all[name] ?? all.values.first { $0.aliases.contains(name) }
     }
 
-    public var sortedSkills: [any Skill] { skills.values.sorted { $0.name < $1.name } }
+    public var sortedSkills: [any Skill] { allSkills.values.sorted { $0.name < $1.name } }
 
     /// Runs a skill and saves the run. Errors are saved in the run's meta too.
     public func run(_ skill: any Skill, argv: [String], reporter: any Reporter, options: RunOptions = RunOptions(),
@@ -60,7 +84,7 @@ public final class Harness: Sendable {
         }
         let ctx = SkillContext(model: RecordingModel(makeModel(), record: { record.model($0) }), reporter: reporter,
                                fetcher: Fetcher(online: online, record: { record.network($0) }), policy: policy,
-                               baseline: baseline, verbose: options.verbose, dryRun: options.dryRun)
+                               baseline: baseline, verbose: options.verbose, dryRun: options.dryRun, prompts: prompts)
         do {
             var result = try await skill.run(args, ctx)
             if result.diff == nil, let b = baseline, skill.comparable(b.facts, result.facts),

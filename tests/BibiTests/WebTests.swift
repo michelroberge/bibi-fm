@@ -117,4 +117,60 @@ import Testing
         }
         #expect(seen == ["one", "p2", "finished"])
     }
+
+    @Test func chatProposeDecideAndSkills() async throws {
+        let model = ScriptedModel([
+            "ChatTurn": [turn("say hi", reply: "I'll run echo.", steps: [("command", ["echo", "hi"])])],
+            "ChatAnswer": [turn("say hi", reply: "It said hi.")],
+            "Compact": [compactAnswer],
+        ])
+        let graph = try GraphStore(path: tmp + "/bibi.db")
+        let harness = Harness(skills: [], store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph) { model }
+        let manager = RunManager(harness: harness)
+        let app = Application(router: WebServer(harness: harness, token: "secret").makeRouter(manager: manager),
+                              configuration: .init(address: .hostname("127.0.0.1", port: 0)))
+        try await app.test(.live) { client in
+            try await client.execute(uri: "/api/chats", method: .get) { #expect($0.status == .unauthorized) }
+            let start = try await post(client, "/api/chat", #"{"message":"say hi"}"#)
+            let id = try #require(start["id"]?.string)
+
+            func settled() async throws -> JSONValue {
+                for _ in 0..<100 {
+                    let v = try await get(client, "/api/chat/\(id)", JSONValue.self)
+                    if v["busy"] == nil || v["busy"] == .null { return v }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                return .null
+            }
+            var view = try await settled()
+            #expect(view["state"]?["pending"]?.string == "F1")
+            let action = try #require(view["report"]?["findings"]?.array?.first?["recommendations"]?.array?.first?["id"]?.string)
+            #expect(view["actionInfo"]?[action]?["privilege"]?.string == "user")
+
+            // One turn at a time per chat.
+            _ = manager.hub(id).begin("chat")
+            try await client.execute(uri: "/api/chat", method: .post, headers: Self.auth,
+                                     body: ByteBuffer(string: #"{"conversation":"\#(id)","message":"again"}"#)) { #expect($0.status == .conflict) }
+            manager.hub(id).emit("done", "test")
+
+            try await client.execute(uri: "/api/chat/\(id)/decide", method: .post, headers: Self.auth,
+                                     body: ByteBuffer(string: #"{"approve":["a99"]}"#)) { #expect($0.status == .badRequest) }
+            _ = try await post(client, "/api/chat/\(id)/decide", #"{"approve":["\#(action)"]}"#)
+            view = try await settled()
+            #expect(view["executed"]?.strings == [action])
+            #expect(view["transcript"]?.array?.last?["text"]?.string == "It said hi.")
+            #expect(view["transcript"]?.array?.contains { $0["role"]?.string == "result" && $0["ok"] == .bool(true) } == true)
+
+            let chats = try await get(client, "/api/chats", JSONValue.self)
+            #expect(chats.array?.first?["title"]?.string == "say hi")
+
+            let skills = try await get(client, "/api/graph/skills", JSONValue.self)
+            #expect(skills.array?.first?["name"]?.string == "generic")
+            #expect(skills.array?.first?["stats"]?["approved"]?.int == 1)
+            let edited = try await post(client, "/api/graph/skills/generic/guidance", #"{"text":"Prefer du over find."}"#)
+            #expect(edited["guidance"]?.string == "Prefer du over find.")
+            try await client.execute(uri: "/api/graph/skills/generic/disable", method: .post, headers: Self.auth,
+                                     body: ByteBuffer(string: "{}")) { #expect($0.status == .badRequest) }
+        }
+    }
 }

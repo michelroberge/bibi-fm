@@ -2,9 +2,11 @@
 
 `bibi` is a small agent that runs tasks ("skills") on your Mac. It uses Apple's on-device Foundation Model, called directly through the FoundationModels framework. Analysis and reasoning happen on your Mac. Nothing goes to the internet unless a skill is marked `[web]` or you pass `--online`.
 
+You can run a skill directly, or **chat with bibi** in the web UI: ask about anything on your Mac or ask it to do something. bibi proposes the exact steps, and nothing runs until you approve them. bibi keeps statistics on what you ask. When the same request keeps coming back, it offers to save it as a new skill.
+
 ```
 bibi <command> [arguments]
-bibi ui
+bibi ui                      # web UI, including Chat
 ```
 
 > [!WARNING]
@@ -35,8 +37,10 @@ Skills are grouped into namespaces: `bibi list` shows all of them, and `bibi sto
 | `sys.health` | Checks CPU, memory, disk I/O, battery, thermal state, login items, crashes and log faults, and links them into likely causes |
 | `sec.audit` `[web]` `[admin]` | Audits the firewall, FileVault, Gatekeeper/SIP, updates, sharing services, listening ports, persistence and lock settings |
 | `net.identify <mac\|ip\|name>` `[web]` | Identifies a device on your network |
-| `ui` | Opens the web UI |
+| `ui` | Opens the web UI, including **Chat** |
 | `history`, `undo`, `diff` | Lists saved runs, undoes actions, and compares runs over time |
+| `skills [candidates\|show\|accept\|dismiss\|disable\|enable <name>]` | The skill tree with statistics, and skills learned in chat |
+| `learned.<name> --<param> …` | A skill bibi learned in chat and you accepted |
 
 `[web]` = can contact internet services. `[admin]` = some of its actions need your password.
 
@@ -57,7 +61,8 @@ At the "Run which?" prompt, `d 3` shows the evidence for action 3 and `p 1,2` pr
 
 - **Evidence first.** Every skill collects observations (command output, files, system APIs), each recorded with its exact source. Deterministic rules turn them into findings with a severity and a confidence.
 - **fm explains; it doesn't detect.** The model explains each finding and may link several findings into a hypothesis. bibi keeps only what cites real observations. The model can lower a rule's confidence, and raise it by at most 15 points, and only when it cited real evidence. Each finding shows its uncertainty (low, medium or high) and whether a rule or fm wrote the explanation.
-- **Safe action registry.** fm never writes commands. Only actions registered in bibi can run, each with fixed parameters that are validated when it's recommended and again right before it runs. Read-only diagnostic commands come from a fixed catalog too.
+- **Safe action registry.** In skills, fm never writes commands. Only actions registered in bibi can run, each with fixed parameters that are validated when it's recommended and again right before it runs. Read-only diagnostic commands come from a fixed catalog too.
+- **The chat exception.** In chat, the model may propose a command of its own (see [Chat with bibi](#chat-with-bibi)). bibi's rules check it, show it word for word with its risk class, and run it only if you approve it.
 - **Dry-run and undo.** Every action can be previewed. Reversible actions record how to reverse them:
   - Trash moves can be put back.
   - Login items are moved to `~/Library/Application Support/bibi/quarantine`, not deleted.
@@ -92,6 +97,93 @@ The web UI starts a server on `127.0.0.1` and opens your browser with a one-time
 - browse **History** (with undo) and **Changes** (baseline diffs)
 
 The server only answers requests that carry the token, and refuses any whose Host or Origin isn't the server itself. Everything is served from the binary, with no CDN, so it works offline.
+
+## Chat with bibi
+
+Open **Chat** in the web UI and ask in plain words: "how much free disk space do I have?", "is my firewall on?", "clean my npm cache", "my Mac is slow, check why".
+
+Each turn:
+
+1. **Retrieve.** bibi looks up what is relevant in its graph (see [bibi.db](#bibidb)):
+   - skills whose keywords match the request, ranked by how often you approved their proposals
+   - up to three example requests that worked before, with the steps that answered them
+   - facts it remembered from earlier chats
+2. **Propose.** The model replies with the steps it wants to run, at most four. A step can be:
+   - one of bibi's skills, for a thorough analysis
+   - a registry action (Trash a file, reveal it in Finder, open a settings pane, a tool's own cleanup)
+   - any other command, as a program and its arguments
+3. **Check.** bibi's rules, not the model, decide what each step is and how risky it is (details below).
+4. **Approve.** Each step is a card with **Approve** / **Skip** and **Preview**. If you skip a step and say why, bibi adds an "Avoid:" note to that skill's guidance for next time.
+5. **Run and answer.** Approved steps run through the same harness as skills, so they are journaled and undoable where possible. Their output becomes evidence, and bibi answers from it. If a skill ran, its own recommendations come back as a new proposal to approve.
+6. **Compact.** Only the last four messages stay word for word. Older ones are folded into a running summary, because the on-device model has a context of about 4k tokens. Facts confirmed in the conversation are stored, but only if their words and numbers appear in what was said.
+
+How commands from chat are checked:
+- **One program with its arguments, never a shell.**
+  - `sh -c`, pipes, redirections, `;`, `&&` and `$(…)` are refused.
+  - Interpreters (`python3`, `node`…) may only print their version.
+  - AppleScript `do shell script` is refused.
+- **Each command gets a class:**
+  - **read-only**: an allow-list of programs and subcommands, such as `df`, `ps`, `sw_vers`, `defaults read`, `launchctl print`, `brew list`, `git status`
+  - **network**: `curl`, `ping`, `dig`…
+  - **writes**: anything else
+  - **admin**: the command starts with `sudo`. bibi asks you to confirm, then macOS asks for your password; bibi never sees it.
+- **Deletes go to the Trash.** `rm <path>` becomes "move to Trash", which `bibi undo` can reverse. Destructive file commands (`mv`, `cp`, `chmod`…) may not touch protected paths.
+- **Checked again at run time.** The check runs a second time just before the command does, so a command stored in a report can't skip it.
+- **Only the latest proposal can be approved.** Sending a new message supersedes the open one.
+
+Each chat is saved as a run in History, with the full transcript, every model call, the journal of what ran, and undo. **Details** on a chat opens that run.
+
+## How bibi learns skills
+
+bibi records an event for everything that happens in chat: what you asked, what it proposed, and what you approved, skipped, ran or saw fail. These statistics feed back into chat:
+
+- **Ranking.** Skills whose proposals you approve more often rank higher. The rate is the posterior mean (approved + 1) / (decided + 2).
+- **Examples.** A request that worked becomes an example for similar requests later.
+- **Guidance.** Each skill has guidance text that is part of its prompt. It is versioned. Skipping with a reason adds an "Avoid:" line, up to five, kept newest first. You can also edit it on the **Skills** page.
+- **Rollback.** After ten decisions, if the current guidance is approved clearly less often than the previous version, bibi switches back to the previous version and logs it.
+
+**New skills.** A cluster forms when three successful requests:
+- have similar wording, and
+- ran the same kind of steps (the same tools and programs).
+
+When that happens, bibi drafts a skill:
+- Arguments that differ between the requests become parameters. For example, three `du -sh <folder>` requests become `learned.folder-size --path …`.
+- The model names the skill.
+
+bibi then asks you in chat whether to keep it. It also appears under **Skills** and in `bibi skills candidates`. Once you accept it, it works everywhere:
+
+```sh
+bibi skills candidates
+bibi skills accept learned.folder-size
+bibi learned.folder-size --path ~/Downloads
+bibi skills disable learned.folder-size
+```
+
+A learned skill only runs read-only commands by itself, and their output becomes evidence. Anything that changes the Mac comes back as a recommendation to approve. Dismissed candidates are not proposed again until the same request has worked twice as many times.
+
+## bibi.db
+
+`~/Library/Application Support/bibi/bibi.db` (it moves with `BIBI_HOME`) is a single SQLite file. It is a small property graph:
+
+| Kind | What | Linked by |
+| --- | --- | --- |
+| `skill`, `namespace` | the skill tree: `generic` (chat) → namespaces → skills, built-in and learned | `child_of`, `uses` (actions) |
+| `action` | registry actions | |
+| `intent` | each request asked in chat, its steps and outcome, plus starter examples | `contains` (conversation), `matched`, `example` |
+| `prompt`, `prompt_version` | every model instruction, versioned: chat, compaction, skill guidance, built-in skill prompts | `has_version`, `derived_from` |
+| `fact` | durable facts confirmed in chats | `from` (conversation) |
+| `conversation` | one chat | |
+
+It also holds:
+- an append-only `events` table with the statistics
+- on-device sentence embeddings (NaturalLanguage) for similarity
+- a full-text index
+
+Built-in skills and their prompts are synced into it at startup. The prompts in the code are the defaults: a revised version you or bibi made is kept when the code changes.
+
+To start over, quit bibi and delete `bibi.db`. Your run history is kept separately in `runs/`.
+
+## Skills
 
 ### storage.optimize
 
@@ -188,40 +280,46 @@ If the ARP table comes back empty, allow your terminal app under **System Settin
 
 ## Adding a skill
 
-Create a module under `bibi/skills/<namespace>/`. It is discovered automatically:
+A skill is a type that conforms to `Skill`. Register it in `Sources/BibiSkills/All.swift`, and bibi syncs it into the graph at startup:
 
-```python
-# bibi/skills/net/ping.py
-from bibi.registry import Context, Skill, SkillResult, skill
+```swift
+public struct Ping: Skill {
+    public init() {}
+    public let name = "net.ping"
+    public let help = "Check whether a host is up"
+    public let keywords = "ping reachable up down host online"   // helps chat find it
+    public var params: [Param] { [.positional("host", help: "name or address")] }
 
-@skill("net.ping", help="Check whether a host is up")
-class Ping(Skill):
-    def add_arguments(self, p):
-        p.add_argument("host")
-
-    def run(self, args, ctx: Context) -> SkillResult:
-        verdict = ctx.llm.respond(prompt, instructions, schema)  # structured JSON from fm
-        return SkillResult(summary="...", actions=[...])         # actions get the "run which?" prompt
+    public func run(_ args: Args, _ ctx: SkillContext) async throws -> SkillResult {
+        let ev = Evidence()
+        let out = await Command.run(["ping", "-c", "3", args.string("host")!])
+        let o = ev.observe(out, out.ok ? "host answered" : "no answer")
+        ev.find("net", "Host is down", severity: .medium, cites: [o], confidence: 80, explanation: "...")
+        return SkillResult(summary: "...", observations: ev.allObservations, findings: ev.allFindings)
+    }
+}
 ```
 
-- `ctx.llm.respond(prompt, instructions, schema)` returns a dict that matches your JSON schema. Keep prompts small: the on-device model's context is only about 4k tokens.
-- Return `Action`s (see `bibi/actions.py`). The front end displays them, asks which to run, and calls `execute()`.
-- Mark a skill `uses_web=True` if it contacts internet services.
+- `ctx.model.respond(prompt, instructions: ctx.prompts.text("net.ping", default: ...), schema:)` returns structured output. Routing the instructions through `ctx.prompts` makes them tunable in `bibi.db`. Keep prompts small: the on-device model's context is about 4k tokens.
+- Recommendations are `BoundAction`s that call a registered `ActionSpec`. The terminal, the web UI and chat all show them, ask for approval, and run them through the `Harness`. To add a new kind of change, add an `ActionSpec` with `validate`, a side-effect-free `plan`, and `execute`, returning an undo call where possible.
+- Set `usesWeb` if the skill contacts internet services.
 
 ## Layout
 
 ```
-bin/bibi            shell shim (symlink target)
-bibi/cli.py         command-line front end
-bibi/registry.py    @skill, Context, SkillResult, discovery
-bibi/llm.py         fm client (fm respond --schema)
-bibi/actions.py     Action, selection grammar, executor
-bibi/ui.py          terminal output and prompts
-bibi/skills/        storage/optimize/, net/identify.py, ...
-tests/              python3 -m unittest discover -s tests   (or: make test)
+Sources/BibiCore/     no UI
+  Harness.swift       runs skills, previews/executes/undoes actions, saves history
+  Actions/            ActionSpec registry, built-in actions, diagnostics, safety policy
+  Chat/               ChatEngine (the generic skill), CommandPolicy, Planner, ContextBuilder
+  Graph/              GraphStore (SQLite), PromptBook, GraphSync, Seeds, embeddings
+  Learn/              SkillMiner, GraphSkill (learned skills), SkillLibrary
+  Model/              LanguageModel, FoundationModel, Explainer
+  History/ Report/ Enrich/ System/
+Sources/BibiSkills/   storage, dev, sys, sec, net (and sw, parked)
+Sources/BibiWeb/      Hummingbird server, JSON API, SSE; Static/ (index.html, app.js, chat.js, style.css)
+Sources/bibi/         command-line front end
+Tests/BibiTests/      swift-testing suites (make test)
 ```
-
-Skills return data (`SkillResult`, `Action`) and never print directly, so a chat or web front end can reuse them unchanged. `fm serve` already exposes an OpenAI-compatible API for that.
 
 Note: macOS hides the ARP table from apps without **Local Network** access, so looking a device up by MAC may fail. Allow the app that runs bibi under System Settings > Privacy & Security > Local Network, or look the device up by IP.
 
@@ -234,4 +332,4 @@ Note: macOS hides the ARP table from apps without **Local Network** access, so l
 | Apple Software Update | `sec.audit --online` | the usual `softwareupdate -l` request |
 | endoflife.date, OSV.dev, package registries | planned for `sw.inventory --online` | product names; package names and versions |
 
-Every request is logged in the run's audit history. Parked and planned work is listed in [docs/todo.md](docs/todo.md).
+Chat never sends anything to the internet by itself. A command you approve can do so: those are labeled **network**. Every request is logged in the run's audit history. Parked and planned work is listed in [docs/todo.md](docs/todo.md).

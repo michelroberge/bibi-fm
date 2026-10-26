@@ -31,6 +31,21 @@ public struct RecordingModel: LanguageModel {
             throw error
         }
     }
+
+    public func stream(_ prompt: String, instructions: String, schema: Schema,
+                       partial: @escaping @Sendable (JSONValue) -> Void) async throws -> JSONValue {
+        let start = Date()
+        do {
+            let r = try await base.stream(prompt, instructions: instructions, schema: schema, partial: partial)
+            record(ModelLogEntry(time: start, schema: schema.name, prompt: prompt, response: r, error: nil,
+                                 seconds: Date().timeIntervalSince(start)))
+            return r
+        } catch {
+            record(ModelLogEntry(time: start, schema: schema.name, prompt: prompt, response: nil, error: "\(error)",
+                                 seconds: Date().timeIntervalSince(start)))
+            throw error
+        }
+    }
 }
 
 /// Used when the model is unavailable: every call fails, so skills fall back to their deterministic output.

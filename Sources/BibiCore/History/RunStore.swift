@@ -101,6 +101,16 @@ public final class RunRecord: Sendable {
         return text.split(separator: "\n").compactMap { try? JSON.decoder.decode(T.self, from: Data($0.utf8)) }
     }
 
+    /// Extra per-run files (chat state and transcript).
+    public func saveFile(_ file: String, _ value: some Encodable) {
+        try? JSON.prettyEncoder.encode(value).write(to: URL(fileURLWithPath: dir + "/" + file))
+    }
+    public func loadFile<T: Decodable>(_ file: String, _ type: T.Type) -> T? {
+        FileManager.default.contents(atPath: dir + "/" + file).flatMap { try? JSON.decoder.decode(T.self, from: $0) }
+    }
+    public func appendLine(_ file: String, _ value: some Encodable) { append(file, value) }
+    public func lines<T: Decodable>(_ file: String, _ type: T.Type) -> [T] { read(file, type) }
+
     public func journal(_ e: JournalEntry) { append("journal.jsonl", e) }
     public func model(_ e: ModelLogEntry) { append("model.jsonl", e) }
     public func network(_ e: NetworkEntry) { append("network.jsonl", e) }

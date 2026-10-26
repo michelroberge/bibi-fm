@@ -5,12 +5,13 @@ import Foundation
 public struct Explainer: Sendable {
     let model: any LanguageModel
     let reporter: any Reporter
+    let prompts: PromptBook
     /// How far the model may raise a rule's confidence.
     public static let maxRaise = 15
     public static let maxLower = 40
 
-    public init(model: any LanguageModel, reporter: any Reporter) {
-        self.model = model; self.reporter = reporter
+    public init(model: any LanguageModel, reporter: any Reporter, prompts: PromptBook = PromptBook()) {
+        self.model = model; self.reporter = reporter; self.prompts = prompts
     }
 
     static let explainInstructions = """
@@ -62,7 +63,7 @@ public struct Explainer: Sendable {
         }
 
         do {
-            let r = try await model.respond(prompt.joined(separator: "\n"), instructions: Self.explainInstructions,
+            let r = try await model.respond(prompt.joined(separator: "\n"), instructions: prompts.text("explain", default: Self.explainInstructions),
                                             schema: Schema("Explanation", fields), as: Explanation.self)
             let valid = r.cites.filter { id in obs.contains { $0.id == id } }
             f.explanation = Self.stripIDs(r.explanation).ifEmpty(f.explanation)
@@ -131,7 +132,7 @@ public struct Explainer: Sendable {
             ])), max: 3)),
         ])
         do {
-            let r = try await model.respond(lines.joined(separator: "\n"), instructions: Self.correlateInstructions,
+            let r = try await model.respond(lines.joined(separator: "\n"), instructions: prompts.text("correlate", default: Self.correlateInstructions),
                                             schema: schema, as: Correlation.self)
             return r.hypotheses.compactMap { h in
                 let fids = h.cites.filter { id in top.contains { $0.id == id } }

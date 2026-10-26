@@ -57,9 +57,46 @@ struct UndoBody: Decodable {
     var confirmAdmin: Bool?
 }
 
+struct ChatBody: Decodable {
+    var conversation: String?
+    var message: String
+}
+
+struct DecideBody: Decodable {
+    var approve: [String]?
+    var skip: [String]?
+    var reason: String?
+    var confirmAdmin: Bool?
+    var dryRun: Bool?
+}
+
+struct GuidanceBody: Decodable {
+    var text: String
+}
+
+struct ChatView: Encodable {
+    var state: ChatState
+    var transcript: [ChatMessage]
+    var report: SkillResult?
+    var actionInfo: [String: ActionInfo]
+    var executed: [String]
+    var undoable: [String]
+    var undoNeedsAdmin: Bool
+    var busy: String?
+    var candidates: [SkillLibrary.SkillView]
+}
+
+struct ChatItem: Encodable {
+    var id: String
+    var title: String
+    var started: Date
+    var actions: Int
+}
+
 struct API: Sendable {
     let harness: Harness
     let manager: RunManager
+    let chat: ChatEngine?
 
     func register(_ api: RouterGroup<BasicRequestContext>) {
         api.get("skills") { _, _ in json(harness.sortedSkills.map(info)) }
@@ -148,8 +185,119 @@ struct API: Sendable {
             return json(DiffView(latest: latest.meta, baseline: base.meta,
                                  changes: Baseline.diff(old: old.facts, new: new.facts, spec: skill.factsSpec)))
         }
-        api.post("chat") { _, _ -> Response in
-            throw HTTPError(.notImplemented, message: "chat is planned; it will use this endpoint and the run event stream")
+        registerChat(api)
+    }
+
+    func engine() throws -> ChatEngine {
+        guard let chat else { throw HTTPError(.serviceUnavailable, message: "chat needs bibi.db, which could not be opened") }
+        return chat
+    }
+
+    func chatRun(_ ctx: BasicRequestContext) throws -> RunRecord {
+        let r = try run(ctx)
+        guard r.meta.skill == "chat" else { throw HTTPError(.notFound, message: "\(r.id) is not a chat") }
+        return r
+    }
+
+    /// Chat: each conversation is a run of the `chat` skill, so its events, journal and undo use the run machinery.
+    /// Turns run in the background; the page follows them on the run's event stream.
+    func registerChat(_ api: RouterGroup<BasicRequestContext>) {
+        api.get("chats") { _, _ in
+            json(try engine().conversations().prefix(100).map { r in
+                ChatItem(id: r.id, title: r.meta.summary ?? "Chat", started: r.meta.started, actions: r.meta.actions ?? 0)
+            })
+        }
+        api.post("chat") { req, _ in
+            let chat = try engine()
+            let b = try await decode(req, ChatBody.self)
+            guard !b.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw HTTPError(.badRequest, message: "empty message")
+            }
+            let run: RunRecord
+            if let id = b.conversation, !id.isEmpty {
+                guard let r = harness.store.find(id), r.meta.skill == "chat" else { throw HTTPError(.notFound, message: "no chat \(id)") }
+                run = r
+            } else {
+                run = try chat.start()
+            }
+            let hub = manager.hub(run.id)
+            guard hub.begin("chat") else { throw HTTPError(.conflict, message: "bibi is still busy with this chat (\(hub.busy ?? ""))") }
+            Task {
+                await chat.send(run, b.message) { hub.emit($0, $1, phase: "chat") }
+                hub.emit("done", "turn", phase: "chat")
+            }
+            return json(["id": run.id])
+        }
+        api.get("chat/:id") { _, ctx in
+            let chat = try engine()
+            let run = try chatRun(ctx)
+            let report = run.report()
+            var info: [String: ActionInfo] = [:]
+            for a in report?.actions ?? [] {
+                if let s = harness.registry.spec(a.call.spec) {
+                    info[a.id] = ActionInfo(privilege: s.privilege, reversible: s.reversible, summary: s.summary)
+                }
+            }
+            let state = chat.state(run)
+            let journal = run.journalEntries
+            return json(ChatView(state: state, transcript: chat.transcript(run), report: report, actionInfo: info,
+                                 executed: journal.filter { $0.event == .executed }.compactMap(\.actionID),
+                                 undoable: run.undoable.compactMap(\.actionID), undoNeedsAdmin: harness.undoNeedsAdmin(run),
+                                 busy: manager.hub(run.id).busy,
+                                 candidates: state.candidates.compactMap { id in
+                                     chat.graph.node(id).map { SkillLibrary.view($0, graph: chat.graph) }
+                                 }))
+        }
+        api.get("chat/:id/events") { req, ctx in
+            let run = try chatRun(ctx)
+            let from = req.uri.queryParameters["from"].flatMap { Int(String($0)) } ?? 0
+            return sse(manager.hub(run.id).subscribe(from: from))
+        }
+        api.post("chat/:id/decide") { req, ctx in
+            let chat = try engine()
+            let run = try chatRun(ctx)
+            let b = try await decode(req, DecideBody.self)
+            let approve = b.approve ?? [], skip = b.skip ?? []
+            // Unknown or superseded ids are a 400 now, not a failed background turn.
+            _ = try bound(run, approve + skip)
+            let pending = chat.state(run).pending
+            let open = Set(run.report()?.findings.first { $0.id == pending }?.recommendations.map(\.id) ?? [])
+            if let stale = (approve + skip).first(where: { !open.contains($0) }) {
+                throw HTTPError(.badRequest, message: "\(stale) belongs to an earlier proposal; ask again")
+            }
+            let hub = manager.hub(run.id)
+            guard hub.begin("decide") else { throw HTTPError(.conflict, message: "bibi is still busy with this chat (\(hub.busy ?? ""))") }
+            let decision = ChatDecision(approve: approve, skip: skip, reason: b.reason, adminConfirmed: b.confirmAdmin ?? false,
+                                        dryRun: b.dryRun ?? false)
+            Task {
+                do {
+                    _ = try await chat.decide(run, decision, admin: OsascriptRunner()) { hub.emit($0, $1, phase: "chat") }
+                } catch {
+                    hub.emit("error", "\(error)", phase: "chat")
+                }
+                hub.emit("done", "decide", phase: "chat")
+            }
+            return json(["ok": true])
+        }
+
+        api.get("graph/skills") { _, _ in json(SkillLibrary.all(try engine().graph)) }
+        api.post("graph/skills/:name/:verb") { _, ctx in
+            let chat = try engine()
+            let name = try ctx.parameters.require("name"), verb = try ctx.parameters.require("verb")
+            guard ["accept", "dismiss", "disable", "enable"].contains(verb) else { throw HTTPError(.notFound, message: "unknown verb \(verb)") }
+            do {
+                return json(try SkillLibrary.decide(name, verb, graph: chat.graph, harness: harness))
+            } catch let e as ActionError {
+                throw HTTPError(.badRequest, message: e.description)
+            }
+        }
+        api.post("graph/skills/:name/guidance") { req, ctx in
+            let chat = try engine()
+            let name = try ctx.parameters.require("name")
+            let b = try await decode(req, GuidanceBody.self)
+            guard let n = chat.graph.node(GraphSync.skillID(name)), n.kind == "skill" else { throw HTTPError(.notFound, message: "no skill \(name)") }
+            PromptBook(chat.graph).revise("skill." + name, text: String(b.text.prefix(2000)), reason: "edited in the web UI")
+            return json(SkillLibrary.view(n, graph: chat.graph))
         }
     }
 
