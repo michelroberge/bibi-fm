@@ -180,11 +180,14 @@ public final class ChatEngine: Sendable {
         let shown = question == nil ? [] : exampleIntents(focus)
         let tools = toolCatalog(skills, request: focus, examples: shown, vector: v)
 
-        // An unfinished request from the last turn: the user's message may be the missing piece.
-        let draft = question == nil ? nil : state.draft
+        // An unfinished request from the last turn: the user's message may be the missing piece, unless it asks for
+        // something else (then the old request would only drag the model back to it).
+        let draft = question == nil ? nil : state.draft.flatMap { Self.continues($0, tools: tools.ids) ? $0 : nil }
         if question != nil { state.draft = nil }
 
         var ctx = ContextBuilder()
+        // The model doesn't know the date; without it, "tomorrow" becomes a date from its training.
+        ctx.add("Now", DateText.formatter("EEEE yyyy-MM-dd HH:mm").string(from: Date()), priority: 0)
         ctx.add("Tools", tools.text, priority: 0, maxChars: 2500)
         ctx.add("Conversation so far", state.summary, priority: 3, maxChars: 1200)
         let known = facts(focus, v)
@@ -228,8 +231,8 @@ public final class ChatEngine: Sendable {
         var plan = Planner.Result(), tried = steps
         for attempt in 0...Self.repairs where !steps.isEmpty {
             tried = steps
-            plan = await bind(steps, run: run, said: said)
-            guard !plan.refusals.isEmpty, attempt < Self.repairs else { break }
+            plan = await bind(steps, run: run, said: said, request: question ?? focus)
+            guard !plan.refusals.isEmpty, plan.actions.isEmpty, attempt < Self.repairs else { break }
             // Let the model fix what the request already answers; what only the user knows becomes a question.
             emit("delta", "Filling in what's missing…")
             var fix = ctx
@@ -255,7 +258,14 @@ public final class ChatEngine: Sendable {
             if finding == nil {
                 // Nothing runnable yet: keep what was tried so the user's answer can complete it, and ask.
                 state.draft = Self.problems(tried, plan.refusals, request: question ?? focus)
-                if !(steps.isEmpty && reply.hasSuffix("?")) { reply = Self.askFor(plan.refusals) }
+                if !(steps.isEmpty && reply.hasSuffix("?")) {
+                    let theirs = plan.refusals.filter(Self.userCanAnswer)
+                    reply = theirs.isEmpty ? "I couldn't turn that into a step I can run. Could you say it another way?" : Self.askFor(theirs)
+                    if theirs.count < plan.refusals.count {
+                        let why = plan.refusals.filter { !Self.userCanAnswer($0) }.map { "- " + $0 }.joined(separator: "\n")
+                        say(run, &state, ChatMessage("note", "What went wrong with the proposed steps:\n" + why), emit)
+                    }
+                }
             } else {
                 let why = plan.refusals.map { "- " + $0 }.joined(separator: "\n")
                 say(run, &state, ChatMessage("note", "bibi left out some of the proposed steps:\n" + why), emit)
@@ -263,10 +273,21 @@ public final class ChatEngine: Sendable {
         }
         if finding != nil && (Self.claimsResults(reply, question: focus) || !Self.readsAsPlan(reply)) {
             // The model sometimes answers as if the steps had already run; nothing has run yet.
-            reply = "I'll check with the step(s) below."
+            reply = "Here is what I'd do; approve it to run."
         }
         if reply.isEmpty { reply = finding == nil ? "I don't have an answer for that." : "Here is what I'd run." }
         say(run, &state, ChatMessage("bibi", reply, finding: finding), emit)
+    }
+
+    /// True if a message whose words selected `tools` can be the answer to `draft`: it brings in no app or skill
+    /// the draft didn't use. "rappelle-moi de tester les emails" after an unfinished email also selects mail (it
+    /// says "emails"), but reminders too: a new request.
+    static func continues(_ draft: String, tools: [String]) -> Bool {
+        // Actions of one app count as one family (mail_send and mail_accounts both belong to Mail).
+        func family(_ tool: String) -> String { tool.hasPrefix("action:") ? Recipes.apps[String(tool.dropFirst(7))] ?? tool : tool }
+        let wanted = Set(tools.filter { $0.hasPrefix("action:") || $0.hasPrefix("app:") || $0.hasPrefix("skill:") }.map(family))
+        let tried = Set(Re.all(#"(?m)^Step: (\S+)"#, draft).compactMap { $0.count > 1 ? family($0[1]) : nil })
+        return wanted.subtracting(tried).isEmpty
     }
 
     /// How many times the model may fix refused steps before bibi asks the user.
@@ -303,10 +324,11 @@ public final class ChatEngine: Sendable {
 
     /// Checks proposed steps: names become addresses, then bibi's rules bind them. Steps already proposed in this
     /// chat (run or skipped) aren't offered again.
-    func bind(_ steps: [PlannedStep], run: RunRecord, said: String) async -> Planner.Result {
+    func bind(_ steps: [PlannedStep], run: RunRecord, said: String, request: String) async -> Planner.Result {
         let planner = Planner(registry: harness.registry, env: harness.env(admin: NoAdminRunner(), reporter: SilentReporter()),
                               skill: { [harness] in harness.skill(named: $0) })
-        let people = await Recipes.resolveRecipients(steps, contacts: harness.apps.contacts, said: said)
+        let prepared = Recipes.groundNames(Recipes.groundDates(Planner.prepare(steps), request: request), said: said)
+        let people = await Recipes.resolveRecipients(prepared, contacts: harness.apps.contacts, said: said)
         var plan = planner.bind(people.steps)
         plan.refusals = people.refusals + plan.refusals
         // A step dropped for its recipient may have other problems too: report them now, so one repair fixes all.
@@ -331,10 +353,19 @@ public final class ChatEngine: Sendable {
         return lines.joined(separator: "\n")
     }
 
+    /// Problems the user can resolve (who, which address, what to say, which list), as opposed to the model
+    /// writing a step wrong, which the user can't fix and shouldn't be asked about.
+    static func userCanAnswer(_ refusal: String) -> Bool {
+        ["wasn't mentioned", "isn't in Contacts", "matches", "has several", "has no email", "has no phone", "has no text yet",
+         "missing parameter", "there is no calendar named", "there is no list named", "is called", "no open reminder",
+         "isn't allowed to use"].contains { refusal.contains($0) }
+    }
+
     /// The question bibi asks when the model couldn't fix the steps itself.
     static func askFor(_ refusals: [String]) -> String {
-        "I need a bit more before I can do this:\n" + refusals.map { "- " + $0 }.joined(separator: "\n")
-            + "\nTell me and I'll propose it again."
+        // "mail_send: the email has no text yet (...)" reads better without the action id.
+        let lines = refusals.map { r in "- " + (Re.test("^[a-z_]+: ", r) ? String(r[r.index(after: r.firstIndex(of: ":")!)...]).trimmingCharacters(in: .whitespaces) : r) }
+        return "I need a bit more before I can do this:\n" + lines.joined(separator: "\n") + "\nTell me and I'll propose it again."
     }
 
     /// A reply sent with a proposal should say what will happen, not what was found.
@@ -399,7 +430,9 @@ public final class ChatEngine: Sendable {
             .sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
     }
 
-    func toolCatalog(_ skills: [GraphNode], request: String, examples: [GraphNode], vector: [Float]? = nil) -> (ids: [String], text: String) {
+    func toolCatalog(_ skills: [GraphNode], request raw: String, examples: [GraphNode], vector: [Float]? = nil) -> (ids: [String], text: String) {
+        // "https" in a pasted link shouldn't offer whatever mentions http.
+        let request = raw.replacingOccurrences(of: #"\S+://\S+|\S+@\S+\.\S+"#, with: " ", options: .regularExpression)
         var ids = ["command"]
         var lines = [#"- command: any program; args = the program, then each argument. Examples: ["df", "-h", "/"] free disk space; ["sw_vers"] macOS version; ["ps", "-Ao", "pid,%cpu,%mem,comm", "-m"] processes by memory; ["du", "-sh", "~/Downloads"] folder size"#]
         let used = Set(examples.flatMap { SkillMiner.steps($0).map(\.tool) })
@@ -468,7 +501,8 @@ public final class ChatEngine: Sendable {
 
     func facts(_ text: String, _ v: [Float]?) -> String {
         var seen = Set<String>()
-        let pool = (graph.search(text, kind: "fact", limit: 10) + graph.nodes(kind: "fact").prefix(40)).filter { seen.insert($0.id).inserted }
+        let pool = (graph.search(text, kind: "fact", limit: 10) + graph.nodes(kind: "fact").prefix(40))
+            .filter { seen.insert($0.id).inserted && !Self.isRequest($0.text) }
         return pool.map { ($0, Similarity.score(text, v, $0.name + " " + $0.text, graph.vector($0.id))) }
             .filter { $0.1 >= 0.35 }.sorted { $0.1 > $1.1 }.prefix(3)
             .map { "- \($0.0.text) (\(ago($0.0.updated)))" }.joined(separator: "\n")
@@ -682,10 +716,16 @@ public final class ChatEngine: Sendable {
         let numbers = { (t: String) in Set(Re.all("[0-9]+(?:[.,][0-9]+)?", t).compactMap(\.first)) }
         let words = Similarity.terms(statement)
         let lower = statement.lowercased()
-        guard words.count >= 3, statement.split(separator: " ").count >= 4,
-              !["i'll", "i will", "result:", "the user asked", "user asked", "bibi will", "bibi"].contains(where: { lower.hasPrefix($0) }),
+        guard words.count >= 3, statement.split(separator: " ").count >= 4, !isRequest(statement),
+              !["i'll", "i will", "result:", "bibi will", "bibi"].contains(where: { lower.hasPrefix($0) }),
               numbers(statement).isSubset(of: numbers(source)) else { return false }
         return Double(words.intersection(Similarity.terms(source)).count) / Double(words.count) >= 0.6
+    }
+
+    /// "The user asked for an email to…": what someone wanted once, not a fact about the Mac or the user. Kept as
+    /// a fact, it steers every later turn back to that request.
+    static func isRequest(_ statement: String) -> Bool {
+        Re.test(#"^(the )?user (asked|requested|wants|wanted|would like|needs|is asking)|^(a |the )?request"#, statement.lowercased())
     }
 
     func remember(_ subject: String, _ statement: String, conversation: String) {

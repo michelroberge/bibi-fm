@@ -12,18 +12,18 @@ public enum Recipes {
     /// How chat offers each one: its parameters and the words that make it relevant.
     public static let hints: [String: (hint: String, words: String)] = [
         "mail_send": ("to=name or address (comma-separated), subject=..., body=..., cc=..., from=one of your addresses (optional)",
-                      "email mail send write reply message"),
-        "mail_accounts": ("no args", "email mail account accounts address addresses from"),
-        "contacts_find": ("name=...", "contact contacts phone number address email who"),
-        "calendar_list": ("from=today|tomorrow|a date, to=a date (optional), calendar=name (optional)",
-                          "calendar agenda schedule meeting meetings event events busy free today tomorrow week"),
-        "calendar_add": ("title=..., start=date and time, end=... (optional), allday=true (optional), calendar=name, location=...",
-                         "calendar add schedule book meeting event appointment"),
-        "reminders_list": ("list=name (optional)", "reminder reminders todo todos task tasks"),
-        "reminder_add": ("title=..., due=date and time (optional), list=name (optional)", "remind reminder todo task add"),
-        "reminder_complete": ("title=... (as listed)", "done complete completed finish check reminder task"),
-        "facetime_call": ("to=name, phone or address, via=audio|video|phone (default audio)", "call phone ring facetime dial video"),
-        "message_send": ("to=name, phone or address, text=...", "text message imessage sms tell"),
+                      "email mail send write reply message courriel envoie envoyer écris écrire répondre"),
+        "mail_accounts": ("no args", "email mail account accounts address addresses from compte comptes adresse courriel"),
+        "contacts_find": ("name=...", "contact contacts phone number address email who numéro téléphone adresse"),
+        "calendar_list": ("from=the day the user said, to=... (optional), calendar=... only when the user names one",
+                          "calendar agenda schedule meeting meetings event events busy free today tomorrow week calendrier réunion rendez libre occupé semaine"),
+        "calendar_add": ("title=..., start=the date and time the user said, end=... (optional), allday=true (optional), calendar=... only when the user names one, location=...",
+                         "calendar add schedule book meeting event appointment calendrier ajoute ajouter réunion rendez planifie"),
+        "reminders_list": ("no args, or list=... only when the user names a list", "reminder reminders todo todos task tasks rappel rappels tâche tâches"),
+        "reminder_add": ("title=..., due=the date and time the user said (optional), list=... only when the user names one", "remind reminder todo task add rappel rappelle rappeler tâche"),
+        "reminder_complete": ("title=... (as listed)", "done complete completed finish check reminder task terminé terminer coche rappel tâche"),
+        "facetime_call": ("to=name, phone or address, via=audio|video|phone (default audio)", "call phone ring facetime dial video appelle appeler appel téléphone vidéo"),
+        "message_send": ("to=name, phone or address, text=...", "text message imessage sms tell texto texte dis"),
     ]
 
     /// The app whose discovered capabilities a built-in action replaces (not offered next to it).
@@ -36,7 +36,7 @@ public enum Recipes {
 
     /// The parameter a lone bare value means.
     public static let mainParam = ["contacts_find": "name", "calendar_add": "title", "reminder_add": "title",
-                                   "reminder_complete": "title", "facetime_call": "to", "reminders_list": "list"]
+                                   "reminder_complete": "title", "facetime_call": "to"]
 
     // MARK: addresses
 
@@ -134,6 +134,44 @@ public enum Recipes {
 
     // MARK: dates
 
+    /// Calendar and list names the model wrote that the user never said ("calendar=calendar") are dropped: the
+    /// default calendar or list, or all of them when listing, is what the user meant.
+    public static func groundNames(_ steps: [PlannedStep], said: String) -> [PlannedStep] {
+        steps.map { s in
+            guard s.tool.hasPrefix("action:calendar_") || s.tool.hasPrefix("action:reminder") else { return s }
+            var s = s
+            s.args.removeAll { a in
+                let parts = a.split(separator: "=", maxSplits: 1).map(String.init)
+                return parts.count == 2 && ["calendar", "list"].contains(parts[0].lowercased()) && !mentioned(parts[1], in: said)
+            }
+            return s
+        }
+    }
+
+    /// The date parameter that the user's words set for each action.
+    static let dateParams = ["reminder_add": "due", "calendar_add": "start", "calendar_list": "from"]
+
+    /// Small models turn "demain à 9h" into a wrong absolute date. When the user's message names a date, that
+    /// date is used, whatever the model wrote; an end before the new start is dropped (an hour is the default).
+    public static func groundDates(_ steps: [PlannedStep], request: String, now: Date = Date()) -> [PlannedStep] {
+        guard let said = DateText.find(in: request, now: now) else { return steps }
+        let exact = DateText.format(said.date, time: said.hasTime)
+        return steps.map { s in
+            guard s.tool.hasPrefix("action:"), let key = dateParams[String(s.tool.dropFirst(7))] else { return s }
+            var s = s
+            s.args.removeAll { $0.lowercased().hasPrefix(key + "=") }
+            s.args.append(key + "=" + exact)
+            // An end the model wrote for its own (wrong) start is dropped when it doesn't fit the user's.
+            if let endKey = ["start": "end", "from": "to"][key] {
+                s.args.removeAll { a in
+                    guard a.lowercased().hasPrefix(endKey + "="), let end = DateText.parse(String(a.dropFirst(endKey.count + 1)), now: now) else { return false }
+                    return end.date <= said.date || (key == "start" && !Calendar.current.isDate(end.date, inSameDayAs: said.date))
+                }
+            }
+            return s
+        }
+    }
+
     static func normalizeDates(_ p: Params, _ keys: [String]) -> Params {
         var p = p
         for k in keys { if let v = p[k], let d = DateText.normalize(v) { p[k] = d } }
@@ -143,6 +181,16 @@ public enum Recipes {
     static func date(_ p: Params, _ key: String, _ id: String) throws -> (date: Date, hasTime: Bool)? {
         guard let v = p[key], !v.isEmpty else { return nil }
         guard let d = DateText.strict(v) else { throw ActionError("\(id): \(key) must be a date like 2026-10-27 15:00, got \(v)") }
+        return d
+    }
+
+    /// For something new (an event, a reminder): a date well in the past is the model's invention, not the user's.
+    static func future(_ p: Params, _ key: String, _ id: String, now: Date = Date()) throws -> (date: Date, hasTime: Bool)? {
+        guard let d = try date(p, key, id) else { return nil }
+        let end = d.hasTime ? d.date : Calendar.current.date(byAdding: .day, value: 1, to: d.date)!
+        guard end > now.addingTimeInterval(-12 * 3600) else {
+            throw ActionError("\(id): \(key) \(p[key]!) is in the past; write the date as the user said it, like \"tomorrow 9am\"")
+        }
         return d
     }
 
@@ -334,7 +382,7 @@ public struct CalendarAdd: ActionSpec {
 
     func event(_ p: Params) throws -> NewEvent {
         let title = try require(p, "title")
-        guard let start = try Recipes.date(p, "start", id) else { throw ActionError("calendar_add: missing parameter start") }
+        guard let start = try Recipes.future(p, "start", id) else { throw ActionError("calendar_add: missing parameter start") }
         let allDay = p["allday"].map { ["true", "yes"].contains($0.lowercased()) } ?? !start.hasTime
         let end = try Recipes.date(p, "end", id)?.date
             ?? (allDay ? start.date : Calendar.current.date(byAdding: .hour, value: 1, to: start.date)!)
@@ -403,15 +451,15 @@ public struct ReminderAdd: ActionSpec {
     public func normalize(_ p: Params, _ env: ActionEnv) -> Params { Recipes.normalizeDates(p, ["due"]) }
     public func validate(_ p: Params, _ env: ActionEnv) throws {
         _ = try require(p, "title")
-        _ = try Recipes.date(p, "due", id)
+        _ = try Recipes.future(p, "due", id)
     }
     public func plan(_ p: Params, _ env: ActionEnv) throws -> [String] {
-        let due = try Recipes.date(p, "due", id)
+        let due = try Recipes.future(p, "due", id)
         return ["add the reminder \"\(p["title"]!)\" to \(p["list"].flatMap { $0.isEmpty ? nil : $0 } ?? "your default list")"
                 + (due.map { ", due \(DateText.display($0.date, time: $0.hasTime))" } ?? ""), "(undo removes it)"]
     }
     public func execute(_ p: Params, _ env: ActionEnv) async throws -> Outcome {
-        let due = try Recipes.date(p, "due", id)
+        let due = try Recipes.future(p, "due", id)
         let r = try await env.apps.calendar.addReminder(title: p["title"]!, due: due?.date, dueHasTime: due?.hasTime ?? false,
                                                         list: p["list"].flatMap { $0.isEmpty ? nil : $0 },
                                                         notes: p["notes"].flatMap { $0.isEmpty ? nil : $0 })

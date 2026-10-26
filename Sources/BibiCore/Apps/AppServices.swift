@@ -211,12 +211,14 @@ public struct EventKitStore: CalendarStore {
 
     public func events(from: Date, to: Date, calendar name: String?) async throws -> [CalendarItem] {
         let s = try await store(.event)
+        defer { withExtendedLifetime(s) {} }  // items read nothing once their store is released
         let cals = try calendar(s, name, .event).map { [$0] }
         return s.events(matching: s.predicateForEvents(withStart: from, end: to, calendars: cals)).map(Self.item)
     }
 
     public func addEvent(_ n: NewEvent) async throws -> CalendarItem {
         let s = try await store(.event)
+        defer { withExtendedLifetime(s) {} }  // items read nothing once their store is released
         let e = EKEvent(eventStore: s)
         e.title = n.title; e.startDate = n.start; e.endDate = n.end; e.isAllDay = n.allDay
         e.location = n.location; e.notes = n.notes
@@ -230,6 +232,7 @@ public struct EventKitStore: CalendarStore {
 
     public func removeEvent(id: String) async throws {
         let s = try await store(.event)
+        defer { withExtendedLifetime(s) {} }  // items read nothing once their store is released
         guard let e = s.event(withIdentifier: id) else { throw ActionError("the event is gone") }
         try s.remove(e, span: .thisEvent, commit: true)
     }
@@ -237,18 +240,22 @@ public struct EventKitStore: CalendarStore {
     func fetch(_ s: EKEventStore, _ cals: [EKCalendar]?, includeCompleted: Bool) async -> [CalendarItem] {
         let p = includeCompleted ? s.predicateForReminders(in: cals)
                                  : s.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: cals)
-        return await withCheckedContinuation { cont in
+        let items = await withCheckedContinuation { cont in
             s.fetchReminders(matching: p) { cont.resume(returning: ($0 ?? []).map(Self.item)) }
         }
+        withExtendedLifetime(s) {}
+        return items
     }
 
     public func reminders(list: String?, includeCompleted: Bool) async throws -> [CalendarItem] {
         let s = try await store(.reminder)
+        defer { withExtendedLifetime(s) {} }  // items read nothing once their store is released
         return await fetch(s, try calendar(s, list, .reminder).map { [$0] }, includeCompleted: includeCompleted)
     }
 
     public func addReminder(title: String, due: Date?, dueHasTime: Bool, list: String?, notes: String?) async throws -> CalendarItem {
         let s = try await store(.reminder)
+        defer { withExtendedLifetime(s) {} }  // items read nothing once their store is released
         let r = EKReminder(eventStore: s)
         r.title = title; r.notes = notes
         if let due {
@@ -271,6 +278,7 @@ public struct EventKitStore: CalendarStore {
 
     public func setCompleted(id: String, _ done: Bool) async throws -> CalendarItem {
         let s = try await store(.reminder)
+        defer { withExtendedLifetime(s) {} }  // items read nothing once their store is released
         let r = try reminder(s, id)
         r.isCompleted = done
         try s.save(r, commit: true)
@@ -279,6 +287,7 @@ public struct EventKitStore: CalendarStore {
 
     public func removeReminder(id: String) async throws {
         let s = try await store(.reminder)
+        defer { withExtendedLifetime(s) {} }  // items read nothing once their store is released
         try s.remove(try reminder(s, id), commit: true)
     }
 }

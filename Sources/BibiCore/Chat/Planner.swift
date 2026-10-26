@@ -54,9 +54,12 @@ public struct Planner: Sendable {
         public var refusals: [String] = []
     }
 
+    /// Steps as small models write them, cleaned up and with split actions merged.
+    public static func prepare(_ steps: [PlannedStep]) -> [PlannedStep] { merge(steps.map(tidy)) }
+
     public func bind(_ steps: [PlannedStep]) -> Result {
         var r = Result()
-        for s in steps {
+        for s in Self.prepare(steps) {
             switch bind(s) {
             case .success(let a): r.actions += a
             case .failure(let e): r.refusals.append(e.description)
@@ -90,8 +93,42 @@ public struct Planner: Sendable {
             }
             args = out
         }
+        if s.tool.hasPrefix("action:") || s.tool.hasPrefix("app:") {
+            // Small models start action args like a command line ("mail", "to=..."): with key=value args present,
+            // a bare word naming the tool means nothing. An empty value ("cc=") means the parameter isn't given.
+            let name = s.tool.split(separator: ":", maxSplits: 1).last.map(String.init)?.lowercased() ?? ""
+            let words = Set(name.split(separator: "_").map(String.init) + [name, "action", "app"])
+            if args.contains(where: { $0.contains("=") }) { args.removeAll { !$0.contains("=") && words.contains($0.lowercased()) } }
+            args.removeAll { $0.hasSuffix("=") && $0.filter({ $0 == "=" }).count == 1 }
+        }
         s.args = args
         return s
+    }
+
+    /// One action split over several steps (the recipient in one, the text in the next) becomes one step again,
+    /// when the steps don't set the same parameter twice.
+    static func merge(_ steps: [PlannedStep]) -> [PlannedStep] {
+        func keys(_ s: PlannedStep) -> Set<String>? {
+            let ks = s.args.map { $0.split(separator: "=", maxSplits: 1).first.map(String.init) ?? "" }
+            return s.args.allSatisfy { $0.contains("=") } ? Set(ks) : nil
+        }
+        var out: [PlannedStep] = []
+        for s in steps {
+            // The same step again with fewer details adds nothing; with more, it replaces the first.
+            if s.tool.hasPrefix("action:"), let i = out.lastIndex(where: { $0.tool == s.tool }) {
+                let a = Set(out[i].args), b = Set(s.args)
+                if b.isSubset(of: a) { continue }
+                if a.isSubset(of: b) { out[i] = s; continue }
+            }
+            if s.tool.hasPrefix("action:"), let i = out.lastIndex(where: { $0.tool == s.tool }),
+               let a = keys(out[i]), let b = keys(s), a.isDisjoint(with: b) {
+                out[i].args += s.args
+                if out[i].purpose.isEmpty { out[i].purpose = s.purpose }
+            } else {
+                out.append(s)
+            }
+        }
+        return out
     }
 
     public func bind(_ s: PlannedStep) -> Swift.Result<[BoundAction], ActionError> {
