@@ -41,7 +41,7 @@ public final class ChatEngine: Sendable {
     static let systemInstructions = """
     You are bibi, an assistant running on the user's Mac. You answer questions about this Mac and do things on it, including with its apps: email, calendar, reminders, contacts, calls, messages and any other listed app.
     You cannot see the Mac yourself. To find something out or change something, propose steps: the user approves them, they run, and you get their results.
-    For an app, use a listed action or app tool. Write people's names and dates as the user said them ("Marie", "tomorrow 3pm"); bibi looks up the names in Contacts and turns the dates into exact times.
+    For an app, use a listed action or app tool. Write people and dates exactly as the user wrote them (a name, an address, "tomorrow 3pm"); bibi looks names up in Contacts and turns dates into exact times. Only include people the user named. For an email or message, write its text from what the user asked, in the user's language.
     steps: when the answer depends on this Mac (disk, versions, processes, settings, files, network) and it isn't in the results above, list the steps that find out or make the change, at most 4. Proposing steps is how you ask permission: never say you can't check, and never guess the state of the Mac.
     Usually one or two steps are enough; only include steps that serve this request. For a quick fact (free space, versions, what is running, a setting), one read-only command is best. Skills are slow, thorough analyses: use one only when the user wants a full check or cleanup. Use a listed action when it does exactly what was asked; otherwise use tool command. Never propose a change the user didn't ask for.
     No steps: when you can answer from the conversation and results, or to ask one short question when the request is ambiguous. Never invent command output or numbers.
@@ -180,16 +180,24 @@ public final class ChatEngine: Sendable {
         let shown = question == nil ? [] : exampleIntents(focus)
         let tools = toolCatalog(skills, request: focus, examples: shown, vector: v)
 
+        // An unfinished request from the last turn: the user's message may be the missing piece.
+        let draft = question == nil ? nil : state.draft
+        if question != nil { state.draft = nil }
+
         var ctx = ContextBuilder()
         ctx.add("Tools", tools.text, priority: 0, maxChars: 2500)
         ctx.add("Conversation so far", state.summary, priority: 3, maxChars: 1200)
-        ctx.add("Known facts", facts(focus, v), priority: 4, maxChars: 600)
+        let known = facts(focus, v)
+        ctx.add("Known facts", known, priority: 4, maxChars: 600)
         if question != nil {
             ctx.add("Examples of requests and the steps that answered them", examples(shown), priority: 1, maxChars: 700)
         }
-        ctx.add("Recent messages", recentText(state, dropLastUser: question != nil), priority: 2, maxChars: 2000)
+        let recent = recentText(state, dropLastUser: question != nil)
+        ctx.add("Recent messages", recent, priority: 2, maxChars: 2000)
         ctx.add("Results of the steps the user approved", state.results.joined(separator: "\n\n"), priority: 0, maxChars: 2500)
         ctx.add("Commands that check the latest findings", (state.hints ?? []).joined(separator: "\n"), priority: 1, maxChars: 900)
+        ctx.add("Unfinished request (the user's message may answer it; then propose the completed steps)", draft ?? "", priority: 0,
+                maxChars: 1200)
         ctx.add(question == nil ? "Task" : "User",
                 question ?? "Answer the user's last request from these results: quote or summarize the output lines that answer it, with the numbers that matter. If they don't answer it, say what is missing.",
                 priority: 0)
@@ -199,31 +207,10 @@ public final class ChatEngine: Sendable {
         let instructions = generic.text.isEmpty ? system : system + "\n" + generic.text
         // After results, only answer: a small model asked to answer and plan at once re-proposes instead of answering.
         let schema = question == nil ? Self.answerSchema : Self.turnSchema(tools.ids)
-        let model = model(run)
-        var budget = self.budget, answer: JSONValue?
-        for _ in 0..<4 {
-            do {
-                answer = try await model.stream(ctx.build(budget: budget).text, instructions: instructions, schema: schema) { partial in
-                    if let r = partial["reply"]?.string, !r.isEmpty { emit("delta", r) }
-                }
-                break
-            } catch let e as LLMError where e.contextOverflow {
-                budget = budget * 2 / 3
-            } catch {
-                say(run, &state, ChatMessage("note", "The model failed: \(error)"), emit)
-                return
-            }
-        }
-        guard let answer else {
-            say(run, &state, ChatMessage("note", "This doesn't fit the model's context even when shortened; start a new chat."), emit)
-            return
-        }
+        guard var answer = await ask(run, &state, ctx, instructions: instructions, schema: schema, emit: emit) else { return }
 
         let phrase = (answer["intent"]?.string ?? "").ifEmpty(Text.oneLine(focus, max: 80))
-        let steps: [PlannedStep] = (answer["steps"]?.array ?? []).compactMap { s in
-            guard let tool = s["tool"]?.string else { return nil }
-            return PlannedStep(tool: tool, args: s["args"]?.strings ?? [], purpose: s["purpose"]?.string ?? "")
-        }
+        var steps = Self.steps(answer)
         var reply = (answer["reply"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let question {
@@ -236,42 +223,113 @@ public final class ChatEngine: Sendable {
             state.intent = id
         }
 
-        var finding: String?, refusedAll = false
-        if !steps.isEmpty {
-            let planner = Planner(registry: harness.registry, env: harness.env(admin: NoAdminRunner(), reporter: SilentReporter()),
-                                  skill: { [harness] in harness.skill(named: $0) })
-            // Names become the one address Contacts has for them before anything is shown for approval.
-            let people = await Recipes.resolveRecipients(steps, contacts: harness.apps.contacts)
-            var plan = planner.bind(people.steps)
-            plan.refusals = people.refusals + plan.refusals
-            // Steps already proposed in this chat (run or skipped) aren't offered again.
-            let earlier = Set((run.report()?.actions ?? []).map { JSON.string($0.call) })
-            plan.actions.removeAll { earlier.contains(JSON.string($0.call)) }
-            if !plan.actions.isEmpty {
-                finding = addProposal(run, title: phrase, explanation: reply, actions: plan.actions)
-                state.pending = finding
-                let owner = owner(of: steps)
-                let g = prompts.active("skill." + (graph.node(owner)?.name ?? "generic"), default: guidanceDefault(owner))
-                state.skill = owner
-                state.guidance = g.version.isEmpty ? nil : g.version
-                graph.record("proposed", node: owner, conversation: run.id)
-                if let gv = state.guidance { graph.record("proposed", node: gv, conversation: run.id) }
-            }
-            refusedAll = plan.actions.isEmpty && !plan.refusals.isEmpty
-            if !plan.refusals.isEmpty {
+        // People and addresses must come from the conversation (or Contacts), never from the model's imagination.
+        let said = [question ?? "", recent, state.summary, known, draft ?? "", state.results.joined(separator: "\n")].joined(separator: "\n")
+        var plan = Planner.Result(), tried = steps
+        for attempt in 0...Self.repairs where !steps.isEmpty {
+            tried = steps
+            plan = await bind(steps, run: run, said: said)
+            guard !plan.refusals.isEmpty, attempt < Self.repairs else { break }
+            // Let the model fix what the request already answers; what only the user knows becomes a question.
+            emit("delta", "Filling in what's missing…")
+            var fix = ctx
+            fix.add("Problems with the steps you proposed", Self.problems(steps, plan.refusals), priority: 0, maxChars: 1500)
+            guard let again = await ask(run, &state, fix, instructions: instructions, schema: schema, emit: emit) else { return }
+            answer = again
+            steps = Self.steps(answer)
+            reply = (answer["reply"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        var finding: String?
+        if !plan.actions.isEmpty {
+            finding = addProposal(run, title: phrase, explanation: reply, actions: plan.actions)
+            state.pending = finding
+            let owner = owner(of: tried)
+            let g = prompts.active("skill." + (graph.node(owner)?.name ?? "generic"), default: guidanceDefault(owner))
+            state.skill = owner
+            state.guidance = g.version.isEmpty ? nil : g.version
+            graph.record("proposed", node: owner, conversation: run.id)
+            if let gv = state.guidance { graph.record("proposed", node: gv, conversation: run.id) }
+        }
+        if !plan.refusals.isEmpty {
+            if finding == nil {
+                // Nothing runnable yet: keep what was tried so the user's answer can complete it, and ask.
+                state.draft = Self.problems(tried, plan.refusals, request: question ?? focus)
+                if !(steps.isEmpty && reply.hasSuffix("?")) { reply = Self.askFor(plan.refusals) }
+            } else {
                 let why = plan.refusals.map { "- " + $0 }.joined(separator: "\n")
-                if plan.actions.isEmpty { reply = reply.isEmpty ? "I couldn't propose anything runnable." : reply }
-                say(run, &state, ChatMessage("note", "bibi won't run some of the proposed steps:\n" + why), emit)
+                say(run, &state, ChatMessage("note", "bibi left out some of the proposed steps:\n" + why), emit)
             }
         }
-        if refusedAll {
-            reply = "I couldn't turn that into steps bibi can run."
-        } else if finding != nil && (Self.claimsResults(reply, question: focus) || !Self.readsAsPlan(reply)) {
+        if finding != nil && (Self.claimsResults(reply, question: focus) || !Self.readsAsPlan(reply)) {
             // The model sometimes answers as if the steps had already run; nothing has run yet.
             reply = "I'll check with the step(s) below."
         }
         if reply.isEmpty { reply = finding == nil ? "I don't have an answer for that." : "Here is what I'd run." }
         say(run, &state, ChatMessage("bibi", reply, finding: finding), emit)
+    }
+
+    /// How many times the model may fix refused steps before bibi asks the user.
+    static let repairs = 2
+
+    /// One model call, shortening the prompt when it overflows the context. Says what went wrong and returns nil
+    /// when it can't answer.
+    func ask(_ run: RunRecord, _ state: inout ChatState, _ ctx: ContextBuilder, instructions: String, schema: Schema,
+             emit: @escaping ChatEmit) async -> JSONValue? {
+        let model = model(run)
+        var budget = self.budget
+        for _ in 0..<4 {
+            do {
+                return try await model.stream(ctx.build(budget: budget).text, instructions: instructions, schema: schema) { partial in
+                    if let r = partial["reply"]?.string, !r.isEmpty { emit("delta", r) }
+                }
+            } catch let e as LLMError where e.contextOverflow {
+                budget = budget * 2 / 3
+            } catch {
+                say(run, &state, ChatMessage("note", "The model failed: \(error)"), emit)
+                return nil
+            }
+        }
+        say(run, &state, ChatMessage("note", "This doesn't fit the model's context even when shortened; start a new chat."), emit)
+        return nil
+    }
+
+    static func steps(_ answer: JSONValue) -> [PlannedStep] {
+        (answer["steps"]?.array ?? []).compactMap { s in
+            guard let tool = s["tool"]?.string else { return nil }
+            return PlannedStep(tool: tool, args: s["args"]?.strings ?? [], purpose: s["purpose"]?.string ?? "")
+        }
+    }
+
+    /// Checks proposed steps: names become addresses, then bibi's rules bind them. Steps already proposed in this
+    /// chat (run or skipped) aren't offered again.
+    func bind(_ steps: [PlannedStep], run: RunRecord, said: String) async -> Planner.Result {
+        let planner = Planner(registry: harness.registry, env: harness.env(admin: NoAdminRunner(), reporter: SilentReporter()),
+                              skill: { [harness] in harness.skill(named: $0) })
+        let people = await Recipes.resolveRecipients(steps, contacts: harness.apps.contacts, said: said)
+        var plan = planner.bind(people.steps)
+        plan.refusals = people.refusals + plan.refusals
+        let earlier = Set((run.report()?.actions ?? []).map { JSON.string($0.call) })
+        plan.actions.removeAll { earlier.contains(JSON.string($0.call)) }
+        return plan
+    }
+
+    /// The steps and what is wrong with them, for the model to fix (or for the next turn, with the request).
+    static func problems(_ steps: [PlannedStep], _ refusals: [String], request: String? = nil) -> String {
+        var lines = request.map { ["Request: " + Text.oneLine($0, max: 300)] } ?? []
+        lines += steps.map { "Step: \($0.tool) \(JSON.string($0.args))" }
+        lines += refusals.map { "Problem: " + $0 }
+        if request == nil {
+            lines.append("Fix the steps using what the user already said (for an email or message, write the text from the request). "
+                         + "If only the user knows what is missing (who, which address, what to say), propose no steps and ask one short question in the user's language.")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The question bibi asks when the model couldn't fix the steps itself.
+    static func askFor(_ refusals: [String]) -> String {
+        "I need a bit more before I can do this:\n" + refusals.map { "- " + $0 }.joined(separator: "\n")
+            + "\nTell me and I'll propose it again."
     }
 
     /// A reply sent with a proposal should say what will happen, not what was found.

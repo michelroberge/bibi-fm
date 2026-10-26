@@ -365,3 +365,7 @@ Note: macOS hides the ARP table from apps without **Local Network** access, so l
 | endoflife.date, OSV.dev, package registries | planned for `sw.inventory --online` | product names; package names and versions |
 
 Chat never sends anything to the internet by itself. A command you approve can do so: those are labeled **network**. Every request is logged in the run's audit history. Parked and planned work is listed in [docs/todo.md](docs/todo.md).
+
+## License
+
+bibi is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE): free for non-commercial use. Commercial use requires a separate license from the copyright holder.
