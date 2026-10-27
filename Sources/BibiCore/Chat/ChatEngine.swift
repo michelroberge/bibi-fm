@@ -64,6 +64,7 @@ public final class ChatEngine: Sendable {
         "trash_path": ("path=/absolute/path", "delete remove trash erase get rid"),
         "reveal": ("path=/absolute/path", "show reveal finder locate where"),
         "open_url": ("url=https://...", "open website web page url link browser"),
+        "open_app": ("app=App Name", "launch open start app application"),
         "open_settings_pane": ("pane=" + OpenSettingsPane.panes.keys.sorted().joined(separator: "|"),
                                "settings preferences pane open privacy firewall sharing battery login"),
         "tool_cleanup": ("tool=" + Tools.commands.keys.sorted().joined(separator: "|"),
@@ -549,13 +550,7 @@ public final class ChatEngine: Sendable {
     }
 
     /// The skill node a proposal belongs to (for statistics): the skill it runs, the skill owning its action, or generic.
-    func owner(of steps: [PlannedStep]) -> String {
-        for s in steps {
-            if s.tool.hasPrefix("skill:") { return GraphSync.skillID(String(s.tool.dropFirst(6))) }
-            if s.tool.hasPrefix("action:"), let src = graph.edges(to: "action:" + s.tool.dropFirst(7), kind: "uses").first?.src { return src }
-        }
-        return GraphSync.root
-    }
+    func owner(of steps: [PlannedStep]) -> String { GraphTuning.owner(of: steps, graph: graph) }
 
     func guidanceDefault(_ skillNode: String) -> String {
         skillNode == GraphSync.root ? "" : harness.skill(named: graph.node(skillNode)?.name ?? "")?.help ?? ""
@@ -569,14 +564,31 @@ public final class ChatEngine: Sendable {
     func rankSkills(_ text: String, _ v: [Float]?, limit: Int = 3) -> [GraphNode] {
         graph.nodes(kind: "skill", status: "active").filter { $0.id != GraphSync.root && harness.skill(named: $0.name) != nil }
             .compactMap { n -> (GraphNode, Double)? in
-                let hits = Similarity.hits(text, (n.props["keywords"]?.string ?? "") + " " + n.text)
+                let described = GraphSync.text(n)
+                let hits = Similarity.hits(text, GraphSync.keywords(n) + " " + described)
                 guard hits > 0 else { return nil }
                 var nv = graph.vector(n.id)
-                if nv == nil, let x = embedder.vector(n.text) { graph.setVector(n.id, x); nv = x }
+                if nv == nil, let x = embedder.vector(described) { graph.setVector(n.id, x); nv = x }
                 let sim = nv.flatMap { a in v.map { Similarity.cosine(a, $0) } } ?? 0
                 return (n, (Double(hits) + sim) * (0.5 + 0.5 * graph.approvalRate(n.id)))
             }
             .sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
+    }
+
+    /// What a request would retrieve, without asking the model (the Graph page's "Try it"): the same steps as a
+    /// turn, minus translation and open forms.
+    public struct Retrieval: Codable, Sendable {
+        public var skills: [String]
+        public var examples: [String]
+        public var tools: [String]
+    }
+
+    public func retrieval(_ text: String) -> Retrieval {
+        let v = embedder.vector(text)
+        let skills = rankSkills(text, v)
+        let shown = exampleIntents(text, tools: toolCatalog(skills, request: text, examples: [], vector: v).ids)
+        return Retrieval(skills: skills.map(\.name), examples: shown.map(\.id),
+                         tools: toolCatalog(skills, request: text, examples: shown, vector: v).ids)
     }
 
     func toolCatalog(_ skills: [GraphNode], request raw: String, examples: [GraphNode], vector: [Float]? = nil) -> (ids: [String], text: String) {
@@ -599,10 +611,13 @@ public final class ChatEngine: Sendable {
         }
         // Discovered app capabilities, when no built-in app action fits or the message names the app: a small model
         // picks whatever is listed, and "email" also matches Safari's "email contents".
+        // "launch garageband" is open_app, not PowerPoint's "launch speller": while it is offered, an app's own
+        // tools only show when the message names that app.
         let covered = Set(ids.compactMap { $0.hasPrefix("action:") ? Recipes.apps[String($0.dropFirst(7))] : nil })
+        let launching = ids.contains("action:open_app")
         for n in rankCapabilities(request, vector, examples: used) {
             guard let bundle = n.props["app"]?.string, !covered.contains(bundle), let app = harness.apps.catalog.app(bundle),
-                  covered.isEmpty || Recipes.mentioned(app.name, in: request),
+                  covered.isEmpty && !launching || Recipes.mentioned(app.name, in: request),
                   let hint = AppScripts.hint(app, op: n.props["op"]?.string ?? "", term: n.props["term"]?.string ?? "") else { continue }
             if !ids.contains("app:" + app.name) { ids.append("app:" + app.name) }
             lines.append(hint)
@@ -644,9 +659,9 @@ public final class ChatEngine: Sendable {
     /// the example used a tool this request's own words select (its `used` edges in the graph).
     func exampleIntents(_ text: String, tools: [String]) -> [GraphNode] {
         let terms = Similarity.terms(text), selected = Set(tools).subtracting(["command"])
-        let ranked = graph.nodes(kind: "intent").filter { $0.props["outcome"]?.string == "ok" }
+        let ranked = graph.nodes(kind: "intent").filter { $0.props["outcome"]?.string == "ok" && $0.status != "disabled" }
             .compactMap { n -> (GraphNode, Double)? in
-                let hits = terms.intersection(Similarity.terms(n.text)).count
+                let hits = terms.intersection(Similarity.terms(GraphSync.text(n))).count
                 let answered = Set(graph.edges(from: n.id, kind: "used").map(\.dst) + SkillMiner.steps(n).map(\.tool))
                 guard hits >= 2 || hits == 1 && !answered.isDisjoint(with: selected) else { return nil }
                 let used = graph.edges(from: n.id, kind: "matched").reduce(0) { $0 + $1.weight }
@@ -654,7 +669,7 @@ public final class ChatEngine: Sendable {
             }
             .sorted { $0.1 > $1.1 }
         var seen = Set<String>(), out: [GraphNode] = []
-        for (n, _) in ranked where out.count < 3 && seen.insert(n.text.lowercased()).inserted { out.append(n) }
+        for (n, _) in ranked where out.count < 3 && seen.insert(GraphSync.text(n).lowercased()).inserted { out.append(n) }
         return out
     }
 
@@ -671,7 +686,7 @@ public final class ChatEngine: Sendable {
                 }
                 return "\(st.tool) " + JSON.string(args)
             }.joined(separator: "; ")
-            return "\"\(Text.oneLine(n.text, max: 100))\" → \(steps)"
+            return "\"\(Text.oneLine(GraphSync.text(n), max: 100))\" → \(steps)"
         }.joined(separator: "\n")
     }
 
@@ -752,10 +767,15 @@ public final class ChatEngine: Sendable {
                                             adminConfirmed: d.adminConfirmed, dryRun: d.dryRun, frontend: "chat")
         var next: String?
         for a in approved where a.call.spec == "run_skill" {
-            let (r, fid, hints) = await runSkill(a, run, dryRun: d.dryRun, reporter: reporter)
+            let (r, fid, hints, candidate) = await runSkill(a, run, dryRun: d.dryRun, reporter: reporter)
             results.append(r)
             if let fid { next = fid }
             if !hints.isEmpty { state.hints = hints }
+            // skills.create drafted a skill: it gets the same card as one learned from repeated requests.
+            if let candidate, let c = graph.node(candidate) {
+                state.candidates.append(c.id)
+                emit("candidate", JSON.string(SkillLibrary.view(c, graph: graph)))
+            }
         }
 
         for r in results {
@@ -829,19 +849,20 @@ public final class ChatEngine: Sendable {
     }
 
     /// Runs a skill the user approved from chat. Its summary becomes evidence; its recommendations come back as
-    /// a new proposal in this chat (so they need their own approval). Returns that proposal's id.
-    func runSkill(_ a: BoundAction, _ run: RunRecord, dryRun: Bool, reporter: any Reporter) async -> (ExecResult, String?, [String]) {
+    /// a new proposal in this chat (so they need their own approval). Returns that proposal's id, diagnostic hints,
+    /// and the skill it drafted (skills.create).
+    func runSkill(_ a: BoundAction, _ run: RunRecord, dryRun: Bool, reporter: any Reporter) async -> (ExecResult, String?, [String], String?) {
         let name = a.call.params["skill"] ?? "", argv = CommandPolicy.decode(a.call.params["argv"] ?? "[]") ?? []
-        func fail(_ m: String) -> (ExecResult, String?, [String]) {
+        func fail(_ m: String) -> (ExecResult, String?, [String], String?) {
             run.journal(JournalEntry(.failed, actionID: a.id, title: a.title, call: a.call, error: m, frontend: "chat"))
-            return (ExecResult(actionID: a.id, title: a.title, ok: false, message: m, reversible: false), nil, [])
+            return (ExecResult(actionID: a.id, title: a.title, ok: false, message: m, reversible: false), nil, [], nil)
         }
         guard let skill = harness.skill(named: name) else { return fail("unknown skill \(name)") }
         run.journal(JournalEntry(.selected, actionID: a.id, title: a.title, call: a.call, frontend: "chat"))
         if dryRun {
             let m = "[dry-run] would run bibi \(name) \(Shell.join(argv))"
             run.journal(JournalEntry(.dryRun, actionID: a.id, title: a.title, call: a.call, message: m, frontend: "chat"))
-            return (ExecResult(actionID: a.id, title: a.title, ok: true, message: m, reversible: false), nil, [])
+            return (ExecResult(actionID: a.id, title: a.title, ok: true, message: m, reversible: false), nil, [], nil)
         }
         do {
             let (child, result) = try await harness.run(skill, argv: argv, reporter: reporter)
@@ -860,7 +881,7 @@ public final class ChatEngine: Sendable {
             }
             run.journal(JournalEntry(.executed, actionID: a.id, title: a.title, call: a.call, message: message, frontend: "chat"))
             return (ExecResult(actionID: a.id, title: a.title, ok: true, message: message, reversible: false, output: text), fid,
-                    Self.hints(result.findings))
+                    Self.hints(result.findings), result.facts["candidate"]?.string)
         } catch {
             return fail("\(error)")
         }

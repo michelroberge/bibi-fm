@@ -117,6 +117,12 @@ public final class GraphStore: Sendable {
         return (rows ?? []).map(Self.node)
     }
 
+    /// How many nodes there are of each kind.
+    public func kinds() -> [String: Int] {
+        let rows = (try? db.withLock { try $0.query("SELECT kind, COUNT(*) AS n FROM nodes GROUP BY kind") }) ?? []
+        return Dictionary(rows.map { ($0["kind"]?.string ?? "", Int($0["n"]?.int ?? 0)) }, uniquingKeysWith: +)
+    }
+
     /// Changes a node in place; does nothing if it doesn't exist.
     public func update(_ id: String, _ change: (inout GraphNode) -> Void) {
         guard var n = node(id) else { return }
@@ -221,6 +227,11 @@ public final class GraphStore: Sendable {
     public func setVector(_ id: String, _ v: [Float]) {
         let data = v.withUnsafeBufferPointer { Data(buffer: $0) }
         _ = try? db.withLock { try $0.query("INSERT OR REPLACE INTO vectors(node, data) VALUES(?,?)", [.text(id), .blob(data)]) }
+    }
+
+    /// Forgets a node's embedding (it is rebuilt from the node's current text when next needed).
+    public func dropVector(_ id: String) {
+        _ = try? db.withLock { try $0.query("DELETE FROM vectors WHERE node = ?", [.text(id)]) }
     }
 
     public func vector(_ id: String) -> [Float]? {

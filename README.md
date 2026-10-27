@@ -41,6 +41,7 @@ Skills are grouped into namespaces: `bibi list` shows all of them, and `bibi sto
 | `history`, `undo`, `diff` | Lists saved runs, undoes actions, and compares runs over time |
 | `skills [candidates\|show\|accept\|dismiss\|disable\|enable <name>]` | The skill tree with statistics, and skills learned in chat |
 | `learned.<name> --<param> …` | A skill bibi learned in chat and you accepted |
+| `skills.create <description>` | Drafts a new skill from your description; you keep or dismiss it under Skills |
 | `apps [scan\|show <app>\|permissions]` | The apps chat can use, and the macOS permissions they need |
 
 `[web]` = can contact internet services. `[admin]` = some of its actions need your password.
@@ -97,12 +98,15 @@ The web UI starts a server on `127.0.0.1` and opens your browser with a one-time
 - expand the evidence behind each finding and run or copy its diagnostic commands
 - **Approve** or **Skip** each recommendation, preview it, then run the approved ones (optionally as a dry run)
 - browse **History** (with undo) and **Changes** (baseline diffs)
+- fine-tune the graph behind the skills on **Graph** (see [Tuning the graph](#tuning-the-graph))
 
 The server only answers requests that carry the token, and refuses any whose Host or Origin isn't the server itself. Everything is served from the binary, with no CDN, so it works offline.
 
 ## Chat with bibi
 
-Open **Chat** in the web UI and ask in plain words: "how much free disk space do I have?", "is my firewall on?", "clean my npm cache", "my Mac is slow, check why".
+Open **Chat** in the web UI and ask in plain words: "how much free disk space do I have?", "is my firewall on?", "clean my npm cache", "my Mac is slow, check why", "launch GarageBand".
+
+To open an app, bibi matches the name you give against the apps that are installed. It looks in the Applications folders and their subfolders, then asks Spotlight for apps kept anywhere else. "garageband" finds GarageBand, and "word" finds Microsoft Word when it is the only app with that word in its name. When several apps fit, bibi names them and asks which one you mean.
 
 Each turn:
 
@@ -196,6 +200,19 @@ bibi skills disable learned.folder-size
 ```
 
 A learned skill only runs read-only commands by itself, and their output becomes evidence. Anything that changes the Mac comes back as a recommendation to approve. Dismissed candidates are not proposed again until the same request has worked twice as many times.
+
+**Describing a skill.** You don't have to wait for a skill to be mined. Ask in chat ("create a skill that shows free disk space and the largest files in a folder"), use **Describe a new skill** on the **Graph** page, or run `bibi skills.create <description>`. bibi drafts the skill as well as it can with the tools chat has. It keeps only the steps its rules accept and lists the rest in the run's notes. The draft is saved as a candidate, so nothing runs until you keep it. Its instructions are the `learn.create` prompt, which you can tune like any other.
+
+### Tuning the graph
+
+The **Graph** page edits what chat retrieves for each skill:
+- **What chat matches:** the skill's keywords and description.
+- **Example requests:** add one with its steps, edit its text, steps or weight (how often it matched), disable it or remove it. A removed manual example is deleted, a learned one is only unlinked from the skill, and a starter example is disabled. Manual examples help retrieval but never count toward mining a skill.
+- **Actions** linked to the skill. The actions its code declares stay linked.
+- **Steps and parameters** of a learned skill. These are checked by the same rules as a draft.
+- **Try it:** type a request and see which skills, examples and tools it would retrieve, without asking the model.
+
+Edits to built-in skills and starter examples are stored as overrides (`props.tuned`). The code's values remain the defaults: they are re-synced at startup without touching your overrides, and **Reset to default** removes an override. The **Advanced** tab lists any node and its edges. There you can change a node's status, edit learned nodes, facts and intents, and add, re-weight or remove edges. Nodes that bibi rebuilds from its code can only change status. Editing a prompt's text adds a new version. Every edit is recorded as a `tuned` event.
 
 ## bibi.db
 

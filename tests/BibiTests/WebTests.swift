@@ -179,6 +179,26 @@ import Testing
                                      body: ByteBuffer(string: "{}")) { #expect($0.status == .badRequest) }
         }
     }
+    @Test func graphTuningRoutes() async throws {
+        let graph = try GraphStore(path: tmp + "/bibi.db")
+        let harness = Harness(skills: [FakeSkill(file: "/x")], store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph) { FakeModel() }
+        let app = Application(router: WebServer(harness: harness, token: "secret").makeRouter(manager: RunManager(harness: harness)),
+                              configuration: .init(address: .hostname("127.0.0.1", port: 0)))
+        try await app.test(.live) { client in
+            let view = try await get(client, "/api/graph/tune/test.fake", JSONValue.self)
+            #expect(view["skill"]?["name"]?.string == "test.fake")
+            let tuned = try await post(client, "/api/graph/tune/test.fake/override", #"{"keywords":"old files"}"#)
+            #expect(tuned["keywords"]?.string == "old files" && tuned["tuned"]?.strings == ["keywords"])
+            let preview = try await get(client, "/api/graph/preview?q=old%20files", JSONValue.self)
+            #expect(preview["skills"]?.strings == ["test.fake"])
+            let node = try await get(client, "/api/graph/node?id=skill:generic", JSONValue.self)
+            #expect(node["locked"]?.string != nil)
+            #expect(try await get(client, "/api/graph/kinds", JSONValue.self)["skill"]?.int ?? 0 >= 3)
+            try await client.execute(uri: "/api/graph/node?id=skill:generic", method: .delete, headers: Self.auth) { #expect($0.status == .badRequest) }
+            try await client.execute(uri: "/api/graph/tune/nope", method: .get, headers: Self.auth) { #expect($0.status == .badRequest) }
+        }
+    }
+
     @Test func quickListShowsRunnableSkills() async throws {
         let graph = try GraphStore(path: tmp + "/bibi.db")
         let harness = Harness(skills: [FakeSkill(file: "/x")], store: RunStore(root: tmp + "/runs"), policy: testPolicy(), graph: graph) { FakeModel() }
