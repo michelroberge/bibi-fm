@@ -3,7 +3,7 @@ import Foundation
 /// Actions available to every skill.
 public enum Builtins {
     public static let all: [any ActionSpec] = [
-        TrashPath(), RestorePath(), ClearRegenerableDir(), EmptyTrash(), ToolCleanup(), Reveal(), OpenURL(),
+        TrashPath(), RestorePath(), ClearRegenerableDir(), EmptyTrash(), ToolCleanup(), Reveal(), OpenURL(), OpenApp(),
         OpenSettingsPane(), RunDiagnostic(admin: false), RunDiagnostic(admin: true),
         RunCommand(admin: false), RunCommand(admin: true), RunSkillSpec(),
     ] + Recipes.all
@@ -166,6 +166,98 @@ public struct OpenURL: ActionSpec {
     public func execute(_ p: Params, _ env: ActionEnv) async throws -> Outcome {
         _ = await Command.run(["open", p["url"]!])
         return Outcome("opened \(p["url"]!)")
+    }
+}
+
+/// Opens an installed app, or brings it forward. The name is matched loosely ("garageband" is GarageBand.app, "word"
+/// is Microsoft Word) against the apps really installed, so nothing else can be opened.
+public struct OpenApp: ActionSpec {
+    public let id = "open_app"
+    public let summary = "Open an app"
+
+    public init() {}
+
+    static func folders(home: String) -> [String] {
+        ["/Applications", "/Applications/Utilities", "/System/Applications", "/System/Applications/Utilities", home + "/Applications"]
+    }
+
+    /// Letters and digits only, lowercased: "Garage Band.app" and "garageband" are the same app.
+    static func key(_ name: String) -> String {
+        let n = name.lowercased().hasSuffix(".app") ? String(name.dropLast(4)) : name
+        return n.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    /// App bundles in the app folders and their subfolders ("/Applications/Microsoft Office/…").
+    static func folderApps(home: String) -> [String] {
+        let fm = FileManager.default
+        return folders(home: home).flatMap { dir -> [String] in
+            ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).sorted().flatMap { e -> [String] in
+                let path = dir + "/" + e
+                if Paths.ext(e) == "app" { return [path] }
+                guard Paths.isDirectory(path), !e.hasPrefix(".") else { return [] }
+                return ((try? fm.contentsOfDirectory(atPath: path)) ?? []).sorted().filter { Paths.ext($0) == "app" }.map { path + "/" + $0 }
+            }
+        }
+    }
+
+    /// Every other app Spotlight knows (Setapp, Homebrew casks, apps kept elsewhere), without helpers inside bundles.
+    static func spotlightApps() -> [String] {
+        let p = Process(), pipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
+        p.arguments = ["kMDItemContentType == \"com.apple.application-bundle\""]
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+            .filter { Paths.ext($0) == "app" && !Paths.parent($0).contains(".app/") && !Paths.parent($0).hasSuffix(".app") }
+    }
+
+    /// Apps the name could mean: the one whose name it is, else those whose name contains it.
+    public static func candidates(_ name: String, home: String) -> [String] {
+        let k = key(Paths.name(name))
+        guard !k.isEmpty else { return [] }
+        let local = folderApps(home: home)
+        if let exact = local.first(where: { key(Paths.name($0)) == k }) { return [exact] }
+        let all = local + spotlightApps()
+        if let exact = all.first(where: { key(Paths.name($0)) == k }) { return [exact] }
+        var seen = Set<String>()
+        return all.filter { key(Paths.name($0)).contains(k) && seen.insert(key(Paths.name($0))).inserted }
+    }
+
+    /// The bundle path of the app called `name`, if exactly one installed app fits.
+    public static func find(_ name: String, home: String) -> String? {
+        let c = candidates(name, home: home)
+        return c.count == 1 ? c[0] : nil
+    }
+
+    /// The app's own name, so the card shows what will open.
+    public func normalize(_ p: Params, _ env: ActionEnv) -> Params {
+        guard let path = p["app"].flatMap({ Self.find($0, home: env.policy.home) }) else { return p }
+        var p = p
+        p["app"] = String(Paths.name(path).dropLast(4))
+        return p
+    }
+
+    public func validate(_ p: Params, _ env: ActionEnv) throws {
+        let name = try require(p, "app")
+        let c = Self.candidates(name, home: env.policy.home)
+        if c.count > 1 {
+            throw ActionError("app: \(name) could be " + c.prefix(4).map { String(Paths.name($0).dropLast(4)) }.joined(separator: ", "))
+        }
+        guard !c.isEmpty else { throw ActionError("app: no app named \(name) is installed") }
+    }
+
+    public func plan(_ p: Params, _ env: ActionEnv) throws -> [String] {
+        ["open -a \(Paths.short(Self.find(p["app"]!, home: env.policy.home) ?? p["app"]!))"]
+    }
+
+    public func execute(_ p: Params, _ env: ActionEnv) async throws -> Outcome {
+        guard let path = Self.find(p["app"]!, home: env.policy.home) else { throw ActionError("\(p["app"]!) is no longer installed") }
+        let out = await Command.run(["open", path])
+        guard out.ok else { throw ActionError("couldn't open \(Paths.name(path)): \(out.stderr.ifEmpty("exit \(out.status)"))") }
+        return Outcome("opened \(Paths.name(path).dropLast(4))")
     }
 }
 

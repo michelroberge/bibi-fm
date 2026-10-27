@@ -415,6 +415,7 @@ function skillCard(s) {
     s.params?.length ? h("div", { class: "small" }, "Run it: ", h("code", {}, `bibi ${s.name} ${s.params.map((p) => `--${p} …`).join(" ")}`)) : null,
     s.examples?.length ? h("details", {}, h("summary", {}, `Learned from ${s.examples.length} request(s)`), h("ul", { class: "small" }, s.examples.map((e) => h("li", {}, e)))) : null,
     editor,
+    h("a", { class: "small", href: `#/graph/${encodeURIComponent(s.name)}` }, "Tune in Graph →"),
     buttons.length ? h("div", { class: "row" }, buttons.map(([verb, label, cls]) => h("button", { class: "small " + cls, onclick: act(verb) }, label))) : null,
     out);
 }

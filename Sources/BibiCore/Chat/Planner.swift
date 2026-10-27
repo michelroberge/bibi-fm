@@ -69,7 +69,7 @@ public struct Planner: Sendable {
     }
 
     /// The parameter a bare value means for actions that take one ("~/x.zip" for trash_path is path=~/x.zip).
-    static let mainParam = ["trash_path": "path", "reveal": "path", "open_url": "url", "open_settings_pane": "pane", "tool_cleanup": "tool"]
+    static let mainParam = ["trash_path": "path", "reveal": "path", "open_url": "url", "open_app": "app", "open_settings_pane": "pane", "tool_cleanup": "tool"]
         .merging(Recipes.mainParam) { a, _ in a }
 
     /// Small models put a whole command line in one string, leave empty strings, or copy placeholders like

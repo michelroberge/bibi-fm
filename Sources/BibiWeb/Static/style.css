@@ -175,3 +175,9 @@ main:has(.chatpage) { max-width: none; padding-left: 24px; padding-right: 24px; 
 .draft label.field.bad input, .draft label.field.bad textarea, .draft label.field.bad select { border-color: var(--bad); }
 .draft .problem { color: var(--bad); font-size: 12px; }
 .seg button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Graph page: inputs fill their table cells; JSON editors use the code font. */
+td input[type=text], td textarea { width: 100%; }
+textarea.mono { font-family: var(--mono); font-size: 12px; }
+a.card { display: block; }
+a.card:hover { text-decoration: none; }

@@ -271,5 +271,35 @@ final class Events: @unchecked Sendable {
         // The model still answers the user's own words.
         #expect(model.last("ChatTurn").contains(french))
     }
-}
 
+    @Test func launchingAnAppOpensIt() async throws {
+        let home = tempDir()
+        for app in ["Zorkle Studio.app", "Tools/Zorkle Mixer.app", "Zorkle Studio.app/Contents/Zorkle Helper.app"] {
+            try FileManager.default.createDirectory(atPath: home + "/Applications/" + app, withIntermediateDirectories: true)
+        }
+        #expect(OpenApp.find("zorklestudio", home: home) == home + "/Applications/Zorkle Studio.app")
+        #expect(OpenApp.find("Zorkle Studio.app", home: home) != nil)
+        #expect(OpenApp.find("zorkle mixer", home: home) == home + "/Applications/Tools/Zorkle Mixer.app")  // in a subfolder
+        #expect(OpenApp.candidates("zorkle", home: home).count == 2)  // ambiguous: not opened, both named
+        #expect(OpenApp.find("zorkle helper", home: home) == nil)  // helpers inside bundles aren't apps
+        var policy = testPolicy()
+        policy.home = home
+        let env = ActionEnv(policy: policy, admin: RecordingAdminRunner())
+        #expect(OpenApp().normalize(["app": "zorklestudio"], env)["app"] == "Zorkle Studio")
+        #expect(throws: ActionError.self) { try OpenApp().validate(["app": "zorkle"], env) }
+        #expect(throws: ActionError.self) { try OpenApp().validate(["app": "no such app anywhere"], env) }
+
+        let model = ScriptedModel([
+            "ChatTurn": [turn("launch safari", reply: "Opening it.", steps: [("action:open_app", ["safari"])])],
+            "Compact": [compactAnswer],
+        ])
+        let (chat, _, _) = engine(model)
+        #expect(chat.retrieval("launch garageband").tools.contains("action:open_app"))
+        let run = try chat.start()
+        await chat.send(run, "launch safari", emit: Events().emit)
+        #expect(model.last("ChatTurn").contains("action:open_app app=App Name"))
+        // A bare name is the app parameter, and the card shows the app's own name.
+        let a = try #require(run.report()?.findings.first?.recommendations.first)
+        #expect(a.call.spec == "open_app" && a.call.params["app"] == "Safari")
+    }
+}

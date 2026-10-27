@@ -92,6 +92,7 @@ document.getElementById("version").addEventListener("click", () => document.getE
 const routes = new Map([
   ["chat", ["chat", (id) => showChat(id)]],
   ["skills", ["skills", () => showSkills()]],
+  ["graph", ["graph", (id) => showGraph(id)]],
   ["run", ["home", (id) => id ? showRun(id) : showHome()]],
   ["history", ["history", () => showHistory()]],
   ["diff", ["diff", (id) => showDiff(id)]],

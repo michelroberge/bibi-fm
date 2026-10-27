@@ -86,6 +86,44 @@ struct GuidanceBody: Decodable {
     var text: String
 }
 
+struct OverrideBody: Decodable {
+    var keywords: String?
+    var text: String?
+}
+
+struct ExampleBody: Decodable {
+    var id: String?
+    var text: String?
+    var steps: [PlannedStep]?
+    var weight: Double?
+    var status: String?
+    var remove: Bool?
+}
+
+struct LinkActionBody: Decodable {
+    var action: String
+    var linked: Bool
+}
+
+struct StepsBody: Decodable {
+    var steps: [PlannedStep]
+    var params: [String]?
+}
+
+struct NodeBody: Decodable {
+    var id: String
+    var name: String?
+    var text: String?
+    var status: String?
+    var props: [String: JSONValue]?
+}
+
+struct EdgeBody: Decodable {
+    var src, dst, kind: String
+    var weight: Double?
+    var remove: Bool?
+}
+
 struct ChatView: Encodable {
     var state: ChatState
     var transcript: [ChatMessage]
@@ -206,6 +244,7 @@ struct API: Sendable {
                                  changes: Baseline.diff(old: old.facts, new: new.facts, spec: skill.factsSpec)))
         }
         registerChat(api)
+        registerGraph(api)
     }
 
     func engine() throws -> ChatEngine {
@@ -349,6 +388,65 @@ struct API: Sendable {
             PromptBook(chat.graph).revise("skill." + name, text: String(b.text.prefix(2000)), reason: "edited in the web UI")
             return json(SkillLibrary.view(n, graph: chat.graph))
         }
+    }
+
+    func tuning() throws -> GraphTuning { GraphTuning(graph: try engine().graph, harness: harness) }
+
+    /// The Graph page: fine-tuning what chat retrieves for each skill, and an advanced editor for any node or edge.
+    /// Node ids contain ":", so they travel in the query or the body.
+    func registerGraph(_ api: RouterGroup<BasicRequestContext>) {
+        api.get("graph/tune/:name") { _, ctx in json(try checked { try tuning().view(ctx.parameters.require("name")) }) }
+        api.post("graph/tune/:name/override") { req, ctx in
+            let b = try await decode(req, OverrideBody.self)
+            return json(try checked { try tuning().override(ctx.parameters.require("name"), keywords: b.keywords, text: b.text) })
+        }
+        api.post("graph/tune/:name/examples") { req, ctx in
+            let b = try await decode(req, ExampleBody.self)
+            return json(try checked { try tuning().addExample(ctx.parameters.require("name"), text: b.text ?? "", steps: b.steps ?? []) })
+        }
+        api.post("graph/tune/:name/example") { req, ctx in
+            let b = try await decode(req, ExampleBody.self)
+            let name = try ctx.parameters.require("name"), t = try tuning()
+            guard let id = b.id else { throw HTTPError(.badRequest, message: "id is required") }
+            return json(try checked {
+                b.remove == true ? try t.removeExample(name, id: id)
+                    : try t.updateExample(name, id: id, text: b.text, steps: b.steps, weight: b.weight, status: b.status)
+            })
+        }
+        api.post("graph/tune/:name/actions") { req, ctx in
+            let b = try await decode(req, LinkActionBody.self)
+            return json(try checked { try tuning().linkAction(ctx.parameters.require("name"), action: b.action, linked: b.linked) })
+        }
+        api.post("graph/tune/:name/steps") { req, ctx in
+            let b = try await decode(req, StepsBody.self)
+            return json(try checked { try tuning().setSteps(ctx.parameters.require("name"), steps: b.steps, params: b.params ?? []) })
+        }
+        api.get("graph/preview") { req, _ in json(try engine().retrieval(req.uri.queryParameters["q"].map(String.init) ?? "")) }
+        api.get("graph/kinds") { _, _ in json(try tuning().kinds()) }
+        api.get("graph/nodes") { req, _ in
+            let q = req.uri.queryParameters
+            return json(try tuning().nodes(kind: q["kind"].map(String.init), query: q["q"].map(String.init) ?? ""))
+        }
+        api.get("graph/node") { req, _ in json(try checked { try tuning().node(req.uri.queryParameters["id"].map(String.init) ?? "") }) }
+        api.post("graph/node") { req, _ in
+            let b = try await decode(req, NodeBody.self)
+            return json(try checked { try tuning().updateNode(b.id, name: b.name, text: b.text, status: b.status, props: b.props) })
+        }
+        api.delete("graph/node") { req, _ in
+            try checked { try tuning().deleteNode(req.uri.queryParameters["id"].map(String.init) ?? "") }
+            return json(["ok": true])
+        }
+        api.post("graph/edge") { req, _ in
+            let b = try await decode(req, EdgeBody.self)
+            try checked { try tuning().edge(b.src, b.dst, b.kind, weight: b.weight, remove: b.remove ?? false) }
+            return json(["ok": true])
+        }
+    }
+
+    /// A change the graph refuses is the request's fault: 400 with the reason.
+    @discardableResult
+    func checked<T>(_ body: () throws -> T) throws -> T {
+        do { return try body() } catch let e as ActionError { throw HTTPError(.badRequest, message: e.description) }
     }
 
     struct DiffView: Encodable {

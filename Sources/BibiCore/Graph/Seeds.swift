@@ -25,6 +25,9 @@ public enum Seeds {
         ("show me ~/Documents/report.pdf in Finder", [.init(tool: "action:reveal", args: ["path=~/Documents/report.pdf"])]),
         ("my Mac is slow, check why", [.init(tool: "skill:sys.health", args: [])]),
         ("free up disk space", [.init(tool: "skill:storage.optimize", args: [])]),
+        ("launch Safari", [.init(tool: "action:open_app", args: ["app=Safari"])]),
+        ("create a skill that shows free disk space and the largest files in Downloads",
+         [.init(tool: "skill:skills.create", args: ["shows free disk space and the largest files in Downloads"])]),
     ]
 
     public static func sync(_ graph: GraphStore) {

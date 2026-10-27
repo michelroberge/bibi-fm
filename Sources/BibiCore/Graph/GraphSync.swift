@@ -41,14 +41,26 @@ public enum GraphSync {
         }
     }
 
-    /// Upserts only if something visible changed (keeps `updated` meaningful and startup cheap).
+    /// Upserts only if something visible changed (keeps `updated` meaningful and startup cheap). The user's
+    /// overrides (`props.tuned`) and a disabled status survive: the code's values are only the defaults.
     static func ensure(_ graph: GraphStore, _ n: GraphNode) {
-        if let old = graph.node(n.id), old.kind == n.kind, old.name == n.name, old.text == n.text, old.props == n.props,
-           old.status == n.status || old.status == "disabled" { return }
         var n = n
-        if let old = graph.node(n.id), old.status == "disabled" { n.status = "disabled" }
+        let old = graph.node(n.id)
+        if let tuned = old?.props["tuned"] { n.props["tuned"] = tuned }
+        if let old, old.kind == n.kind, old.name == n.name, old.text == n.text, old.props == n.props,
+           old.status == n.status || old.status == "disabled" { return }
+        if old?.status == "disabled" { n.status = "disabled" }
         graph.upsert(n)
     }
+
+    /// A field as the user tuned it (Graph page), or the node's own value.
+    public static func tuned(_ n: GraphNode, _ key: String) -> JSONValue? { n.props["tuned"]?[key] }
+
+    /// The words chat matches a skill on: the user's override, or the code's keywords.
+    public static func keywords(_ n: GraphNode) -> String { tuned(n, "keywords")?.string ?? n.props["keywords"]?.string ?? "" }
+
+    /// A skill's description or an example's request: the user's override, or the node's text.
+    public static func text(_ n: GraphNode) -> String { tuned(n, "text")?.string ?? n.text }
 
     /// How to pass arguments, with defaults filled in, e.g. ["--top", "5"] (what a small model copies best).
     public static func example(_ params: [Param]) -> String {

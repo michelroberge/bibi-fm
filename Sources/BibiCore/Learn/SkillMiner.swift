@@ -23,8 +23,9 @@ public struct SkillMiner: Sendable {
     help: one sentence saying what the skill does, starting with a verb.
     """
 
+    /// A node's steps: the user's override (Graph page), or the steps it was saved with.
     public static func steps(_ n: GraphNode) -> [PlannedStep] {
-        n.props["steps"].flatMap { try? JSON.decode([PlannedStep].self, from: JSON.string($0)) } ?? []
+        (GraphSync.tuned(n, "steps") ?? n.props["steps"]).flatMap { try? JSON.decode([PlannedStep].self, from: JSON.string($0)) } ?? []
     }
 
     /// The intents that ran successfully with the same signature as `intent` and similar wording.
@@ -32,7 +33,8 @@ public struct SkillMiner: Sendable {
         guard let sig = intent.props["signature"]?.string else { return [] }
         let v = graph.vector(intent.id)
         return graph.nodes(kind: "intent").filter { n in
-            n.props["outcome"]?.string == "ok" && n.props["seed"] == nil && n.props["signature"]?.string == sig
+            n.props["outcome"]?.string == "ok" && n.status != "disabled" && n.props["seed"] == nil
+                && n.props["source"]?.string != "manual" && n.props["signature"]?.string == sig
                 && (n.id == intent.id || Similarity.score(intent.name, v, n.name, graph.vector(n.id)) >= Self.similarity)
         }
     }

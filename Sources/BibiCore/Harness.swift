@@ -39,10 +39,13 @@ public final class Harness: Sendable {
 
     public init(skills: [any Skill], store: RunStore = RunStore(), policy: SafetyPolicy = SafetyPolicy(),
                 graph: GraphStore? = nil, apps: AppServices = .system, model: @escaping @Sendable () -> any LanguageModel) {
+        let registry = ActionRegistry(Builtins.all + skills.flatMap(\.actionSpecs))
+        // With a graph, bibi can also draft a skill from a description.
+        let skills = graph.map { skills + [SkillAuthor(graph: $0, registry: registry)] } ?? skills
         var d: [String: any Skill] = [:]
         for s in skills { d[s.name] = s }
         self.skills = d
-        self.registry = ActionRegistry(Builtins.all + skills.flatMap(\.actionSpecs))
+        self.registry = registry
         self.store = store
         self.policy = policy
         self.graph = graph

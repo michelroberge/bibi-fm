@@ -16,7 +16,7 @@ public struct GraphSkill: Skill {
         nodeID = node.id
         name = node.name
         help = node.props["help"]?.string ?? String(node.text.split(separator: "\n").first ?? "")
-        steps = (node.props["steps"]).flatMap { try? JSON.decode([PlannedStep].self, from: JSON.string($0)) } ?? []
+        steps = SkillMiner.steps(node)
         params = (node.props["params"]?.strings ?? []).map { key in
             Param(key: key, flags: ["--" + key], kind: .string, help: "value for {\(key)}", defaultValue: nil,
                   metavar: key.uppercased(), required: true)

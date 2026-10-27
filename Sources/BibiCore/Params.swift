@@ -69,10 +69,15 @@ public struct Args: Sendable, Codable, Equatable {
                     values[p.key, default: []].append(v)
                 }
             } else {
-                guard !positionals.isEmpty else { throw ArgError("unexpected argument \(arg)") }
-                let p = positionals.removeFirst()
+                guard let p = positionals.first else { throw ArgError("unexpected argument \(arg)") }
                 try validate(p, arg)
-                values[p.key] = [arg]
+                // A list positional takes every remaining word ("bibi skills.create show free space").
+                if p.kind == .list {
+                    values[p.key, default: []].append(arg)
+                } else {
+                    positionals.removeFirst()
+                    values[p.key] = [arg]
+                }
             }
             i += 1
         }
@@ -96,7 +101,7 @@ public struct Args: Sendable, Codable, Equatable {
         var out: [String] = []
         for p in params {
             guard let vs = values[p.key] else { continue }
-            if p.flags.isEmpty { out += vs.prefix(1) }
+            if p.flags.isEmpty { out += p.kind == .list ? vs : Array(vs.prefix(1)) }
             else if p.kind == .flag { out.append(p.flags.last!) }
             else { for v in vs where v != p.defaultValue { out += [p.flags.last!, v] } }
         }
