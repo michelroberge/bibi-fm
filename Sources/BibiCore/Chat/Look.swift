@@ -16,7 +16,8 @@ extension ChatEngine {
         Schema("Next", [
             .init("done", .bool, "true when the notes answer the request, or nothing read-only would add to them"),
             .init("steps", .array(.object(Schema("Step", [
-                .init("tool", .choice(tools)),
+                // Every tool can be turned off in Settings; a choice needs at least one value.
+                .init("tool", .choice(tools.isEmpty ? ["none"] : tools)),
                 .init("args", .array(.string, max: 16), "command: the program, then each argument; action: key=value"),
                 .init("purpose", .string, "a few words: what this step finds out"),
             ])), max: 2), "empty when done"),

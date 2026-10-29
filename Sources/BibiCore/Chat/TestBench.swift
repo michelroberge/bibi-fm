@@ -3,7 +3,8 @@ import Foundation
 /// Settings' Test bench: what chat would do with a request, without a conversation. It retrieves exactly as a
 /// first turn does (`pick`, `turnContext`, `turnInstructions`), optionally asks the model and binds its steps with
 /// bibi's rules, and shows the prompt, its sections and its size. Nothing is saved, proposed or run: no run, no
-/// intent node, no events (only embeddings may be cached).
+/// intent node, no statistics. Only what any first read creates may appear: cached embeddings and a prompt's
+/// built-in version 1.
 extension ChatEngine {
     public struct Tokens: Codable, Sendable {
         public var instructions: Int

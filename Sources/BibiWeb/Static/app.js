@@ -64,7 +64,7 @@ const runPath = (id, rest) => `runs/${encodeURIComponent(id)}/${rest}`;
 
 // Fills `out` with what `render` returns, or with the error it throws.
 async function fill(out, render) {
-  try { out.replaceChildren(...[await render()].flat()); } catch (e) { out.replaceChildren(failBox(e.message)); }
+  try { out.replaceChildren(...[await render()].flat(Infinity).filter((c) => c != null && c !== false)); } catch (e) { out.replaceChildren(failBox(e.message)); }
 }
 
 let catalog = { diagnostics: [], actions: [] };

@@ -211,6 +211,11 @@ tr.over td:first-child { border-left: 3px solid var(--accent); }
 a.item:hover { background: var(--bg); text-decoration: none; }
 .knob { padding: 10px 0; border-bottom: 1px solid var(--line); }
 .knob:last-child { border-bottom: none; }
+.knob.over { padding-left: 12px; }
+.split { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.split > :first-child { flex: 1; }
+.split > .row { flex-wrap: nowrap; }
+.unit { min-width: 34px; }
 .warnbox { background: var(--warn-soft); border-color: var(--warn); }
 .problem { color: var(--bad); }
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }

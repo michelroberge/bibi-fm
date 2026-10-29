@@ -94,7 +94,8 @@ public final class ChatEngine: Sendable {
         Schema("ChatTurn", [
             .init("intent", .string, "a short phrase for what the user wants, like 'check free disk space'"),
             .init("steps", .array(.object(Schema("Step", [
-                .init("tool", .choice(tools)),
+                // Every tool can be turned off in Settings; a choice needs at least one value.
+                .init("tool", .choice(tools.isEmpty ? ["none"] : tools)),
                 .init("args", .array(.string, max: 16), "command: the program, then each argument; action: key=value; skill: its options"),
                 .init("purpose", .string, "a few words: why this step"),
             ])), max: 4), "empty when you can answer without running anything"),

@@ -361,7 +361,7 @@ public final class GraphStore: Sendable {
     /// A consistent copy of the database at `to` (which must not exist).
     public func backup(to: String) throws {
         try FileManager.default.createDirectory(atPath: Paths.parent(to), withIntermediateDirectories: true)
-        try db.withLock { try $0.query("VACUUM INTO ?", [.text(to)]) }
+        _ = try db.withLock { try $0.query("VACUUM INTO ?", [.text(to)]) }
     }
 
     /// Replaces the database with the copy at `from` (a backup) and reopens it.

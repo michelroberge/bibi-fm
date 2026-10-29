@@ -45,7 +45,7 @@ As of 2026-10-28. What shipped is in the README; `make eval` and its numbers are
 
 ## Other
 
-- Check in a real browser: approve, execute, the admin password dialog, undo, the Changes page; in chat, streaming
+- Check in a real browser: approve, execute, the admin password dialog, undo; in chat, streaming
   replies, dry run, accepting a candidate from the chat card, "Work it out", and "Let bibi look" (no card for
   read-only steps, a card for a write, every auto-run command in the run's journal).
 - Remove the Python implementation (`bibi/`, `tests/test_bibi.py`) after a final side-by-side run. The Swift port

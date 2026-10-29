@@ -13,6 +13,14 @@ public struct PlannedStep: Codable, Sendable, Equatable {
         self.tool = tool; self.args = args; self.purpose = purpose
     }
 
+    /// Args and purpose may be left out (steps typed in Settings): no arguments, no purpose.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tool = try c.decode(String.self, forKey: .tool)
+        args = try c.decodeIfPresent([String].self, forKey: .args) ?? []
+        purpose = try c.decodeIfPresent(String.self, forKey: .purpose) ?? ""
+    }
+
     /// What kind of step this is, for recognizing repeated requests: the tool plus the program for commands.
     public var signature: String {
         tool == "command" ? "command:" + Paths.name(args.first == "sudo" ? (args.dropFirst().first ?? "") : (args.first ?? "")) : tool

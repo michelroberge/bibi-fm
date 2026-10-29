@@ -233,7 +233,10 @@ public struct Settings: Sendable {
     /// How bibi's rules would treat a command typed as a shell line (split like a shell would, without running it).
     public func checkCommand(_ line: String) -> CommandCheck {
         let argv = Shell.split(line)
-        let v = CommandPolicy.classify(argv, policy: harness.policy)
+        var v = CommandPolicy.classify(argv, policy: harness.policy)
+        // A rewrite (rm → trash_path) is checked like the action itself would be: the Trash refuses protected paths.
+        let env = harness.env(admin: NoAdminRunner(), reporter: SilentReporter())
+        if v.refusal == nil, let bad = v.rewrite.lazy.compactMap({ harness.registry.preview($0, env).error }).first { v.refusal = bad }
         return CommandCheck(argv: v.argv, cls: v.refusal == nil ? v.cls.rawValue : nil, refusal: v.refusal,
                             rewrite: v.rewrite.map { "\($0.spec) \($0.params.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))" })
     }

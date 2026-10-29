@@ -55,3 +55,11 @@ no card for read-only steps. What it showed:
   answer is as good. Output clipped to a chunk of 1500 characters keeps every call near 1k tokens.
 - **A per-program cap is needed.** "Never run again a program whose result is in the notes" is ignored by a 3B model;
   the cap of two runs per program per task did what the instruction couldn't.
+
+## Settings refactor, 2026-10-28 (knobs, prompt catalog, Test bench)
+
+Every constant chat used became a Settings knob with the old value as its built-in, and the remaining hardcoded prompt
+text moved into the prompt book with the same text. With no overrides the prompts are byte for byte the same, and so are the proposals: the 22
+single-request cases give the same 16 passes and the same 6 failures as the baseline above (17/27 overall). The look
+cases vary from run to run on both builds: "do I have Node installed" answered `v25.8.0` once (7 calls) and
+`/opt/homebrew/bin/Node` the next time (4 calls, 925 tokens), and the commit before this change (f5790f7) does exactly the same.

@@ -60,8 +60,8 @@ function lineDiff(a, b) {
   let i = 0, j = 0;
   while (i < m || j < n) {
     if (i < m && j < n && x[i] === y[j]) { out.push(h("div", {}, "  " + x[i])); i++; j++; }
-    else if (j < n && (i >= m || L[i][j + 1] >= L[i + 1][j])) { out.push(h("div", { class: "change-added" }, "+ " + y[j])); j++; }
-    else { out.push(h("div", { class: "change-removed" }, "− " + x[i])); i++; }
+    else if (i < m && (j >= n || L[i + 1][j] >= L[i][j + 1])) { out.push(h("div", { class: "change-removed" }, "− " + x[i])); i++; }
+    else { out.push(h("div", { class: "change-added" }, "+ " + y[j])); j++; }
   }
   return h("pre", { class: "diff" }, out);
 }
@@ -116,6 +116,7 @@ async function showSettings(id) {
     return;
   }
   const o = settingsOverview;
+  o.total = o.knobs + o.prompts + o.skills + o.examples + o.tools + o.policy;
   const counts = { model: o.knobs, prompts: o.prompts, skills: o.skills, examples: o.examples, tools: o.tools + o.policy };
   const content = h("div", { class: "settings-main" });
   app().replaceChildren(
@@ -126,7 +127,7 @@ async function showSettings(id) {
       [["model", o.knobs, "setting"], ["prompts", o.prompts, "prompt"], ["skills", o.skills, "skill"], ["examples", o.examples, "example"], ["tools", o.tools + o.policy, "tool rule"]]
         .filter(([, n]) => n).map(([s, n, w]) => h("a", { href: "#/settings/" + s }, `${n} ${w}${n === 1 ? "" : "s"}`)),
       o.stalePrompts ? pill(`${o.stalePrompts} prompt(s): built-in changed`, "warn") : null)
-      : null,
+      : "",
     h("div", { class: "settings" },
       h("aside", {}, SECTIONS.map(([key, label]) => h("a", { href: "#/settings/" + key, class: key === sec[0] ? "on" : "" },
         h("span", {}, label),
@@ -136,7 +137,7 @@ async function showSettings(id) {
   content.replaceChildren(h("h2", {}, sec[1]), h("p", { class: "muted small" }, sec[2]), h("span", { class: "spinner" }));
   const body = await ({ bench: benchSection, model: modelSection, prompts: promptsSection, skills: skillsSection, examples: examplesSection,
     tools: toolsSection, memory: memorySection, data: dataSection, cleanup: cleanupSection }[sec[0]])(item);
-  content.replaceChildren(...[body].flat());
+  content.replaceChildren(...[body].flat(Infinity).filter((c) => c != null && c !== false));
 }
 
 const rerenderSettings = () => showSettings(location.hash.split("/").slice(2).map(decodeURIComponent).join("/"));
@@ -208,7 +209,7 @@ async function modelSection() {
     const save = (value) => change(msg, () => api("settings/knobs", { id: kn.id, value }), (all) => { knobs.splice(0, knobs.length, ...all); draw(); refreshSettingsBadge(); });
     return h("div", { class: "knob" + (k.overridden ? " over" : "") },
       h("div", { class: "spread" }, h("div", { class: "row" }, h("strong", {}, kn.label), origin(k.overridden)),
-        h("div", { class: "row" }, input, h("span", { class: "muted small" }, kn.unit),
+        h("div", { class: "row" }, input, h("span", { class: "muted small unit" }, kn.unit),
           h("button", { class: "small", onclick: () => save(Number(input.value))() }, "Save"),
           k.overridden ? h("button", { class: "small", onclick: save(null) }, "Revert") : null)),
       h("div", { class: "small muted" }, kn.help, ` Built-in: ${kn.builtIn}${kn.unit ? " " + kn.unit : ""}; ${kn.min}–${kn.max}.`), msg);
@@ -903,7 +904,7 @@ function cleanupRow(o) {
         h("ul", { class: "small" }, preview.items.map((i) => h("li", {}, i)), preview.count > preview.items.length ? h("li", { class: "muted" }, `and ${preview.count - preview.items.length} more`) : null),
         h("p", { class: "small muted" }, "bibi.db is backed up first.")];
       if (o.op === "factory") body.push(h("label", { class: "field" }, h("span", {}, "Type reset to confirm"), typed = h("input", { type: "text" })));
-      if (!o.safe && !await confirmDialog(o.title + "?", body, o.title.split(" ")[0], true)) return;
+      if (!o.safe && !await confirmDialog(o.title + "?", body, verb, true)) return;
       if (typed && typed.value.trim().toLowerCase() !== "reset") { out.replaceChildren(failBox("Not reset: type reset to confirm.")); return; }
       const r = await api(`settings/cleanup/${o.op}`, { days: nDays() });
       out.replaceChildren(h("div", { class: "result ok" }, `Done: ${r.count} item(s). Backup ${r.backup} `, h("a", { href: "#/settings/data" }, "(restore from Data)"), "."));
@@ -911,9 +912,10 @@ function cleanupRow(o) {
       await refreshSettingsBadge();
     } catch (e) { out.replaceChildren(failBox(e.message)); }
   };
+  const verb = o.op === "tools" ? "Turn on" : o.title.split(" ")[0];
   return h("div", { class: "item" },
-    h("div", { class: "spread" }, h("div", {}, h("strong", {}, o.title), h("div", { class: "small muted" }, o.detail)),
+    h("div", { class: "split" }, h("div", {}, h("strong", {}, o.title), h("div", { class: "small muted" }, o.detail)),
       h("div", { class: "row" }, days ? [h("span", { class: "small muted" }, "older than"), days, h("span", { class: "small muted" }, "days")] : null, count,
-        h("button", { class: "small " + (o.op === "factory" ? "danger" : ""), onclick: run }, o.safe ? "Tidy" : o.group === "Back to built-in" ? "Revert" : "Delete"))),
+        h("button", { class: "small " + (o.op === "factory" ? "danger" : ""), onclick: run }, verb))),
     out);
 }

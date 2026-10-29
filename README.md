@@ -30,7 +30,7 @@ Development: `./bin/bibi` builds and runs from the repo. `make test` runs the te
 | `sys.health` | Checks CPU, memory, disk, battery, thermals, login items, crashes and log faults |
 | `sec.audit` `[web]` `[admin]` | Audits firewall, FileVault, Gatekeeper/SIP, updates, sharing, ports and persistence |
 | `net.identify <mac\|ip\|name>` `[web]` | Identifies a device on your network |
-| `ui` | Web UI: Chat, Run, History, Changes, Skills, Graph |
+| `ui` | Web UI: Chat, Run, History, Settings |
 | `history`, `undo <run>`, `diff <skill>` | Saved runs, undo, and changes since a baseline |
 | `skills [candidates\|accept\|dismiss\|disable\|enable <name>]` | Skills, including ones learned in chat |
 | `skills.create <description>` | Drafts a new skill from a description |
@@ -56,7 +56,20 @@ Ask in plain words: "how much free disk space do I have?", "my Mac is slow, chec
 
 ## Learning
 
-bibi stores statistics, skills, prompts, examples and facts in `~/Library/Application Support/bibi/bibi.db` (set `BIBI_HOME` to move it). Skills you approve more often rank higher. Skipping a step with a reason adds an "Avoid:" note to that skill's guidance. Three similar successful requests become a candidate skill (`learned.<name>`) that you can accept. Edit what chat retrieves on the **Graph** page. To start over, delete `bibi.db`.
+bibi stores statistics, skills, prompts, examples and facts in `~/Library/Application Support/bibi/bibi.db` (set `BIBI_HOME` to move it). Skills you approve more often rank higher. Skipping a step with a reason adds an "Avoid:" note to that skill's guidance. Three similar successful requests become a candidate skill (`learned.<name>`) that you can accept.
+
+## Settings
+
+Everything that shapes bibi lives under **Settings** in the web UI. Each value ships built in. What you change is an override, marked **Overridden** next to its built-in value, and **Revert** brings the built-in back.
+
+- **Test bench**: type a request and see what chat would retrieve, the exact prompt and its estimated tokens out of the model's ~4k, the model's answer, and the steps bibi's rules keep. Nothing is saved or run.
+- **Model & context**: the context budget and the size of each prompt section, retrieval limits, repairs, look rounds, notes, learning thresholds and timeouts.
+- **Prompts**: every instruction bibi gives the model, with version history and approval rates. **Try** sends an edited prompt to the model with a sample input. When bibi's built-in text changes after you overrode it, the prompt says so.
+- **Skills** and **Examples**: what chat matches each skill on, the example requests the model copies, learned skills, and new skills (described, or written step by step).
+- **Tools**: turn actions or scriptable apps off for chat, preview an action, add programs to the read-only list or block them, and check how a command would be classified. bibi's own rules can't be loosened.
+- **Memory**: the facts bibi remembered.
+- **Data**: `bibi.db` statistics, events, raw nodes and edges, backups, and export or import of your overrides.
+- **Cleanup**: revert overrides, or forget learned skills, examples, facts, statistics, chats or old runs, up to a factory reset. Each operation shows its count first and backs up `bibi.db` before it runs.
 
 ## Online lookups
 
