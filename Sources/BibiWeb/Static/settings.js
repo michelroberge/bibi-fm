@@ -336,8 +336,6 @@ async function skillsSection(item) {
   if (item) return skillDetail(await api(tunePath(item)));
   const all = await api("graph/skills");
   const out = h("div", {});
-  const tuned = new Set((await api("settings/examples?source=none").catch(() => [])).map(() => ""));
-  void tuned;
   const proposed = all.filter((s) => s.status === "candidate");
   const learned = all.filter((s) => s.source === "learned" && s.status !== "candidate");
   const builtin = all.filter((s) => s.source !== "learned");
@@ -891,10 +889,11 @@ function cleanupRow(o) {
   const days = o.takesDays ? h("input", { type: "number", value: 30, min: 0, step: 1, style: "width: 80px" }) : null;
   const count = h("span", {}, pill(String(o.count), o.count ? "accent" : ""));
   const nDays = () => days ? Number(days.value) : undefined;
-  if (days) days.addEventListener("change", async () => {
+  const recount = async () => {
     const r = await api(`settings/cleanup/${o.op}`, { dryRun: true, days: nDays() }).catch(() => null);
     if (r) count.replaceChildren(pill(String(r.count), r.count ? "accent" : ""));
-  });
+  };
+  if (days) { days.addEventListener("change", recount); recount(); }
   const run = async () => {
     try {
       const preview = await api(`settings/cleanup/${o.op}`, { dryRun: true, days: nDays() });
