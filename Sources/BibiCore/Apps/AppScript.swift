@@ -407,7 +407,7 @@ public struct RunAppCall: ActionSpec {
 
     public func execute(_ p: Params, _ env: ActionEnv) async throws -> Outcome {
         let (app, s) = try resolve(p, env)
-        let out = try await env.apps.scripts.run(s.source, args: s.args, timeout: 90)
+        let out = try await env.apps.scripts.run(s.source, args: s.args, timeout: env.knobs[.appCallTimeout])
         var lines = out.components(separatedBy: "\n")
         var undo: ActionCall?
         if let cls = s.undoClass, let last = lines.last, last.hasPrefix("id:") {

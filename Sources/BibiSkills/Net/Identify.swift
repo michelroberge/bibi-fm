@@ -10,6 +10,12 @@ public struct NetIdentify: Skill {
     public var aliases: [String] { ["net-identify"] }
     public var usesWeb: Bool { true }
     public var onlineByDefault: Bool { true }
+    public var prompts: [PromptDefinition] {
+        [PromptDefinition("net.identify", "Identify a device", group: PromptCatalog.analysis,
+                          purpose: "Reads what was found about a network device (vendor, open ports, names) and says what it probably is.",
+                          builtIn: Self.instructions, schema: Self.schema,
+                          sample: "Target: 10.0.0.42\nMAC vendor: Brother Industries\nOpen ports: 80, 443, 515, 631, 9100\nmDNS: Brother HL-L2350DW._ipp._tcp")]
+    }
     public var params: [Param] {
         [
             .positional("target", help: "MAC (00:dd:1f:e2:aa:44), IP (10.0.0.42) or hostname (printer.local)"),

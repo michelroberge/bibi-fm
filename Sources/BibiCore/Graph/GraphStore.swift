@@ -57,6 +57,8 @@ public final class GraphStore: Sendable {
         CREATE TABLE vectors(node TEXT PRIMARY KEY, data BLOB NOT NULL);
         CREATE VIRTUAL TABLE nodes_fts USING fts5(id UNINDEXED, name, text);
         """,
+        // Settings overrides (knobs, policy lists): one JSON value per key; a missing key means the built-in value.
+        "CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated REAL NOT NULL);",
     ]
 
     public init(path: String = Paths.bibiHome + "/bibi.db") throws {
@@ -270,6 +272,119 @@ public final class GraphStore: Sendable {
             GraphEvent(id: r["id"]?.int ?? 0, time: Date(timeIntervalSince1970: r["time"]?.double ?? 0), kind: r["kind"]?.string ?? "",
                        node: r["node"]?.string ?? "", conversation: r["conversation"]?.string,
                        payload: r["payload"]?.string.flatMap { try? JSON.decode(JSONValue.self, from: $0) })
+        }
+    }
+
+    /// Deletes events (all, or those about `nodes`, or older than `before`). Returns how many went.
+    @discardableResult
+    public func deleteEvents(nodes: [String]? = nil, before: Date? = nil) -> Int {
+        var sql = "DELETE FROM events WHERE 1=1", args: [SQLValue] = []
+        if let nodes { sql += " AND node IN (\(nodes.map { _ in "?" }.joined(separator: ",")))"; args += nodes.map { .text($0) } }
+        if let before { sql += " AND time < ?"; args.append(.double(before.timeIntervalSince1970)) }
+        if nodes?.isEmpty == true { return 0 }
+        return (try? db.withLock { d -> Int in
+            try d.query(sql, args)
+            return Int(try d.query("SELECT changes() AS n").first?["n"]?.int ?? 0)
+        }) ?? 0
+    }
+
+    /// How many events there are (about `nodes` when given).
+    public func eventCount(nodes: [String]? = nil) -> Int {
+        if nodes?.isEmpty == true { return 0 }
+        var sql = "SELECT COUNT(*) AS n FROM events", args: [SQLValue] = []
+        if let nodes { sql += " WHERE node IN (\(nodes.map { _ in "?" }.joined(separator: ",")))"; args = nodes.map { .text($0) } }
+        return Int((try? db.withLock { try $0.query(sql, args) })?.first?["n"]?.int ?? 0)
+    }
+
+    // MARK: settings
+
+    /// The stored override for a settings key, if any.
+    public func setting(_ key: String) -> JSONValue? {
+        (try? db.withLock { try $0.query("SELECT value FROM settings WHERE key = ?", [.text(key)]) })?.first?["value"]?.string
+            .flatMap { try? JSON.decode(JSONValue.self, from: $0) }
+    }
+
+    /// Stores an override; nil removes it (back to the built-in value).
+    public func setSetting(_ key: String, _ value: JSONValue?) {
+        _ = try? db.withLock { d in
+            if let value {
+                try d.query("INSERT OR REPLACE INTO settings(key, value, updated) VALUES(?,?,?)",
+                            [.text(key), .text(JSON.string(value)), .double(Date().timeIntervalSince1970)])
+            } else {
+                try d.query("DELETE FROM settings WHERE key = ?", [.text(key)])
+            }
+        }
+    }
+
+    /// Every stored override.
+    public func settings() -> [String: JSONValue] {
+        let rows = (try? db.withLock { try $0.query("SELECT key, value FROM settings") }) ?? []
+        var out: [String: JSONValue] = [:]
+        for r in rows {
+            if let k = r["key"]?.string, let v = r["value"]?.string.flatMap({ try? JSON.decode(JSONValue.self, from: $0) }) { out[k] = v }
+        }
+        return out
+    }
+
+    // MARK: maintenance
+
+    /// Vectors whose node is gone.
+    public func orphanVectors(delete: Bool) -> Int {
+        (try? db.withLock { d -> Int in
+            let n = Int(try d.query("SELECT COUNT(*) AS n FROM vectors WHERE node NOT IN (SELECT id FROM nodes)").first?["n"]?.int ?? 0)
+            if delete { try d.query("DELETE FROM vectors WHERE node NOT IN (SELECT id FROM nodes)") }
+            return n
+        }) ?? 0
+    }
+
+    /// Drops every cached embedding (they are rebuilt from the nodes' text when next needed).
+    @discardableResult
+    public func clearVectors() -> Int {
+        (try? db.withLock { d -> Int in
+            let n = Int(try d.query("SELECT COUNT(*) AS n FROM vectors").first?["n"]?.int ?? 0)
+            try d.query("DELETE FROM vectors")
+            return n
+        }) ?? 0
+    }
+
+    /// Empties every table (a factory reset; built-ins are re-synced by the caller).
+    public func wipe() {
+        _ = try? db.withLock { d in
+            try d.transaction {
+                for t in ["nodes", "edges", "events", "vectors", "nodes_fts", "settings"] { try d.exec("DELETE FROM \(t)") }
+            }
+        }
+    }
+
+    public func vacuum() { _ = try? db.withLock { try $0.exec("VACUUM") } }
+
+    /// A consistent copy of the database at `to` (which must not exist).
+    public func backup(to: String) throws {
+        try FileManager.default.createDirectory(atPath: Paths.parent(to), withIntermediateDirectories: true)
+        try db.withLock { try $0.query("VACUUM INTO ?", [.text(to)]) }
+    }
+
+    /// Replaces the database with the copy at `from` (a backup) and reopens it.
+    public func restore(from: String) throws {
+        guard path != ":memory:" else { throw SQLiteError(description: "an in-memory database can't be restored") }
+        // Opening it first checks that it is a database at all.
+        _ = try SQLiteDB(path: from)
+        try db.withLock { d in
+            // Close the open handle before swapping files: replace it with a throwaway in-memory one first.
+            d = try SQLiteDB(path: ":memory:")
+            let fm = FileManager.default
+            for suffix in ["", "-wal", "-shm"] where fm.fileExists(atPath: path + suffix) { try fm.removeItem(atPath: path + suffix) }
+            try fm.copyItem(atPath: from, toPath: path)
+            let fresh = try SQLiteDB(path: path)
+            try fresh.migrate(Self.migrations)
+            d = fresh
+        }
+    }
+
+    /// The database file's size in bytes (with its write-ahead log).
+    public var fileSize: Int64 {
+        ["", "-wal"].reduce(Int64(0)) { sum, s in
+            sum + ((try? FileManager.default.attributesOfItem(atPath: path + s)[.size] as? Int64) ?? 0)
         }
     }
 

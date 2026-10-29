@@ -33,20 +33,23 @@ public final class ChatEngine: Sendable {
     public let graph: GraphStore
     let embedder: any Embedder
     /// Characters of prompt per turn, at most (the on-device model has ~4k tokens for instructions, prompt, schema
-    /// and answer; `ask` gives the instructions and schema their share first).
-    let budget: Int
+    /// and answer; `ask` gives the instructions and schema their share first): the `chat.budget` knob, unless the
+    /// engine was made with a fixed one (tests).
+    let fixedBudget: Int?
+    var budget: Int { fixedBudget ?? knobs.int(.chatBudget) }
     /// Characters a whole call may take, instructions and schema included: ~2.5k tokens, leaving room for the answer.
-    static let contextChars = 10_000
+    var contextChars: Int { knobs.int(.contextChars) }
     /// The prompt never shrinks below this, whatever the instructions take: the request and the tools must fit.
     static let minPromptChars = 1500
     /// Messages kept verbatim; older ones are compacted into the summary.
-    public static let keepMessages = 4
+    public var keepMessages: Int { knobs.int(.keepMessages) }
 
-    public init(harness: Harness, graph: GraphStore, embedder: any Embedder = SentenceEmbedder(), budget: Int = 6000) {
-        self.harness = harness; self.graph = graph; self.embedder = embedder; self.budget = budget
+    public init(harness: Harness, graph: GraphStore, embedder: any Embedder = SentenceEmbedder(), budget: Int? = nil) {
+        self.harness = harness; self.graph = graph; self.embedder = embedder; self.fixedBudget = budget
     }
 
     var prompts: PromptBook { PromptBook(graph) }
+    public var knobs: Knobs { Knobs(graph) }
 
     static let systemInstructions = """
     You are bibi, an assistant running on the user's Mac. You answer questions about this Mac and do things on it, including with its apps: email, calendar, reminders, contacts, calls, messages and any other listed app.
@@ -172,7 +175,11 @@ public final class ChatEngine: Sendable {
         emit("message", JSON.string(m))
     }
 
-    func model(_ run: RunRecord) -> any LanguageModel { RecordingModel(harness.model) { run.model($0) } }
+    /// The model, recording into the run's model log; without a run (the Test bench) nothing is recorded.
+    func model(_ run: RunRecord?) -> any LanguageModel {
+        guard let run else { return harness.model }
+        return RecordingModel(harness.model) { run.model($0) }
+    }
 
     // MARK: a user message
 
@@ -180,7 +187,7 @@ public final class ChatEngine: Sendable {
     /// `look`: read-only steps run without a card, and bibi keeps looking until it can answer ("Let bibi look").
     public func send(_ run: RunRecord, _ text: String, explore: Bool = false, look: Bool = false, emit: @escaping ChatEmit) async {
         var state = state(run)
-        let question = Text.clip(text.trimmingCharacters(in: .whitespacesAndNewlines), max: 2000)
+        let question = Text.clip(text.trimmingCharacters(in: .whitespacesAndNewlines), max: knobs.int(.inputMax))
         guard !question.isEmpty else { return }
         state.look = look ? true : nil
         if state.turns == 0 {
@@ -221,11 +228,9 @@ public final class ChatEngine: Sendable {
         let words = topic == focus ? focus : focus + "\n" + topic
         let v = embedder.vector(topic)
         harness.apps.catalog.refresh(graph: graph)
-        let skills = rankSkills(topic, v)
-        // Only the tools the message's own words select: an example's tools ("bibi" recalls a reminder) aren't a topic.
-        let worded = toolCatalog(skills, request: words, examples: [], vector: v).ids
-        let shown = question == nil ? [] : exampleIntents(topic, tools: worded)
-        var tools = toolCatalog(skills, request: words, examples: shown, vector: v)
+        let picked = pick(topic, words: words, vector: v, examples: question != nil)
+        let (skills, worded, shown) = (picked.skills, picked.worded, picked.shown)
+        var tools = picked.tools
 
         // An unfinished request from the last turn: the user's message may be the missing piece, unless it asks for
         // something else (then the old request would only drag the model back to it).
@@ -248,37 +253,9 @@ public final class ChatEngine: Sendable {
             tools = t
         }
 
-        var ctx = ContextBuilder()
-        // The model doesn't know the date; without it, "tomorrow" becomes a date from its training.
-        ctx.add("Now", DateText.formatter("EEEE yyyy-MM-dd HH:mm").string(from: Date()), priority: 0)
-        ctx.add("Tools", tools.text, priority: 0, maxChars: 2500)
-        ctx.add("Conversation so far", editing.isEmpty ? state.summary : "", priority: 3, maxChars: 1200)
-        let known = facts(topic, v)
-        ctx.add("Known facts", known, priority: 4, maxChars: 600)
-        // While a card is being filled in, past requests would only lend it their content.
-        if question != nil && editing.isEmpty {
-            ctx.add("Examples of requests and the steps that answered them", examples(shown), priority: 1, maxChars: 700)
-        }
-        let recent = recentText(state, dropLastUser: question != nil)
-        // While the user fills in a card, the card holds what was settled: the messages that led to it would only
-        // repeat it less precisely (and use the small context). Grounding below still checks the whole conversation.
-        ctx.add("Recent messages", editing.isEmpty ? recent : recentText(state, dropLastUser: true, since: previous), priority: 2,
-                maxChars: 2000)
-        // Not the raw output: the notes, a few lines copied from it (Notes.swift). This turn's always; earlier ones if related.
-        ctx.add("What the steps found", notesText(state, turn: state.turns), priority: 0, maxChars: 2500)
-        ctx.add("Found earlier in this chat", notesText(state, before: state.turns, topic: topic), priority: 2, maxChars: 800)
-        ctx.add("Commands that check the latest findings", (state.hints ?? []).joined(separator: "\n"), priority: 1, maxChars: 900)
-        ctx.add("Unfinished request (the user's message may answer it; then propose the completed steps)", draft ?? "", priority: 0,
-                maxChars: 1200)
-        ctx.add("Proposal the user is filling in (to change it, propose the same action with only the fields to change)",
-                editing.isEmpty ? "" : form, priority: 0, maxChars: 1500)
-        ctx.add(question == nil ? "Task" : "User",
-                question ?? "Answer the user's last request from what the steps found: quote the lines and numbers that answer it. If they don't answer it, say what is missing.",
-                priority: 0)
-
-        let generic = prompts.active("skill.generic", default: "")
-        let system = prompts.text("chat.system", default: Self.systemInstructions)
-        let instructions = generic.text.isEmpty ? system : system + "\n" + generic.text
+        let (ctx, known, recent) = turnContext(state, question: question, topic: topic, vector: v, tools: tools.text, shown: shown,
+                                               previous: previous, draft: draft, form: form, editing: !editing.isEmpty)
+        let instructions = turnInstructions()
         // After results, only answer: a small model asked to answer and plan at once re-proposes instead of answering.
         let schema = question == nil ? Self.answerSchema : Self.turnSchema(tools.ids)
         guard var answer = await ask(run, &state, ctx, instructions: instructions, schema: schema, emit: emit) else { return }
@@ -303,7 +280,8 @@ public final class ChatEngine: Sendable {
         // Values in the open form were said by the user (typed there) or already checked.
         let said = [question ?? "", recent, state.summary, known, draft ?? "", form, state.results.joined(separator: "\n")].joined(separator: "\n")
         var plan = Planner.Result(), tried = steps, best: (plan: Planner.Result, steps: [PlannedStep])?
-        for attempt in 0...Self.repairs where !steps.isEmpty {
+        let repairs = knobs.int(.repairCount)
+        for attempt in 0...repairs where !steps.isEmpty {
             tried = steps
             plan = await bind(steps, run: run, said: said, request: question ?? focus, editing: editing)
             // What was asked for was refused and only steps the request didn't ask for are left (an example's
@@ -317,12 +295,12 @@ public final class ChatEngine: Sendable {
             let drafts = plan.actions.filter { $0.problems != nil }
             // Nothing runnable: up to two repairs. A draft with gaps: one, in case the request already fills them.
             guard plan.actions.isEmpty && !plan.refusals.isEmpty || !drafts.isEmpty,
-                  attempt < (plan.actions.isEmpty ? Self.repairs : 1) else { break }
+                  attempt < (plan.actions.isEmpty ? repairs : 1) else { break }
             // Let the model fix what the request already answers; what only the user knows becomes a question.
             emit("delta", "Filling in what's missing…")
             var fix = ctx
             let gaps = drafts.flatMap { a in (a.problems ?? [:]).sorted { $0.key < $1.key }.map { "\(a.call.spec): \($0.key.isEmpty ? "" : $0.key + ": ")\($0.value)" } }
-            fix.add("Problems with the steps you proposed", Self.problems(steps, plan.refusals + gaps), priority: 0, maxChars: 1500)
+            fix.add("Problems with the steps you proposed", Self.problems(steps, plan.refusals + gaps, fix: prompts.text("chat.repair", default: Self.repairInstruction)), priority: 0, maxChars: 1500)
             guard let again = await ask(run, &state, fix, instructions: instructions, schema: schema, emit: emit) else { return }
             answer = again
             steps = Self.steps(answer)
@@ -376,6 +354,62 @@ public final class ChatEngine: Sendable {
         say(run, &state, ChatMessage("bibi", reply, finding: finding), emit)
     }
 
+    /// The skills, tools and examples a request gets. `worded` are the tools the message's own words select: an
+    /// example's tools ("bibi" recalls a reminder) aren't a topic.
+    func pick(_ topic: String, words: String, vector v: [Float]?, examples: Bool)
+        -> (skills: [GraphNode], worded: [String], shown: [GraphNode], tools: (ids: [String], text: String)) {
+        let skills = rankSkills(topic, v)
+        let worded = toolCatalog(skills, request: words, examples: [], vector: v).ids
+        let shown = examples ? exampleIntents(topic, tools: worded) : []
+        return (skills, worded, shown, toolCatalog(skills, request: words, examples: shown, vector: v))
+    }
+
+    /// What one turn shows the model, besides its instructions. Shared by `think` and the Test bench (`dryTurn`), so
+    /// Settings shows exactly the prompt a real turn would send.
+    func turnContext(_ state: ChatState, question: String?, topic: String, vector v: [Float]?, tools: String, shown: [GraphNode],
+                     previous: String?, draft: String?, form: String, editing: Bool) -> (ctx: ContextBuilder, known: String, recent: String) {
+        var ctx = ContextBuilder()
+        // The model doesn't know the date; without it, "tomorrow" becomes a date from its training.
+        ctx.add("Now", DateText.formatter("EEEE yyyy-MM-dd HH:mm").string(from: Date()), priority: 0)
+        ctx.add("Tools", tools, priority: 0, maxChars: knobs.int(.capTools))
+        ctx.add("Conversation so far", !editing ? state.summary : "", priority: 3, maxChars: knobs.int(.capSummary))
+        let known = facts(topic, v)
+        ctx.add("Known facts", known, priority: 4, maxChars: knobs.int(.capFacts))
+        // While a card is being filled in, past requests would only lend it their content.
+        if question != nil && !editing {
+            ctx.add("Examples of requests and the steps that answered them", examples(shown), priority: 1, maxChars: knobs.int(.capExamples))
+        }
+        let recent = recentText(state, dropLastUser: question != nil)
+        // While the user fills in a card, the card holds what was settled: the messages that led to it would only
+        // repeat it less precisely (and use the small context). Grounding below still checks the whole conversation.
+        ctx.add("Recent messages", !editing ? recent : recentText(state, dropLastUser: true, since: previous), priority: 2,
+                maxChars: knobs.int(.capRecent))
+        // Not the raw output: the notes, a few lines copied from it (Notes.swift). This turn's always; earlier ones if related.
+        ctx.add("What the steps found", notesText(state, turn: state.turns), priority: 0, maxChars: knobs.int(.capResults))
+        ctx.add("Found earlier in this chat", notesText(state, before: state.turns, topic: topic), priority: 2, maxChars: 800)
+        ctx.add("Commands that check the latest findings", (state.hints ?? []).joined(separator: "\n"), priority: 1, maxChars: knobs.int(.capHints))
+        ctx.add("Unfinished request (the user's message may answer it; then propose the completed steps)", draft ?? "", priority: 0,
+                maxChars: 1200)
+        ctx.add("Proposal the user is filling in (to change it, propose the same action with only the fields to change)",
+                editing ? form : "", priority: 0, maxChars: 1500)
+        ctx.add(question == nil ? "Task" : "User",
+                question ?? prompts.text("chat.task.answer", default: Self.answerTask),
+                priority: 0)
+        return (ctx, known, recent)
+    }
+
+    /// The chat instructions: `chat.system` plus the generic skill's guidance.
+    func turnInstructions() -> String {
+        let generic = prompts.active("skill.generic", default: "")
+        let system = prompts.text("chat.system", default: Self.systemInstructions)
+        return generic.text.isEmpty ? system : system + "\n" + generic.text
+    }
+
+    /// The `command` tool's line in the tool list, with examples of argv.
+    static let commandTool = #"- command: any program; args = the program, then each argument. Examples: ["df", "-h", "/"] free disk space; ["sw_vers"] macOS version; ["ps", "-Ao", "pid,%cpu,%mem,comm", "-m"] processes by memory; ["du", "-sh", "~/Downloads"] folder size"#
+
+    static let answerTask = "Answer the user's last request from what the steps found: quote the lines and numbers that answer it. If they don't answer it, say what is missing."
+
     /// A proposal from this turn, recorded for the skill that owns it (statistics, guidance, learning).
     func propose(_ run: RunRecord, _ state: inout ChatState, title: String, explanation: String, actions: [BoundAction], owner: String) -> String {
         let finding = addProposal(run, title: title, explanation: explanation, actions: actions)
@@ -423,9 +457,6 @@ public final class ChatEngine: Sendable {
         let tried = Set(Re.all(#"(?m)^Step: (\S+)"#, draft).compactMap { $0.count > 1 ? family($0[1]) : nil })
         return wanted.subtracting(tried).isEmpty
     }
-
-    /// How many times the model may fix refused steps before bibi asks the user.
-    static let repairs = 2
 
     /// How good a bound plan is: runnable actions first, then fewer gaps and refusals.
     /// A built-in app action the request's words didn't select: an example brought it in, not the request.
@@ -496,15 +527,14 @@ public final class ChatEngine: Sendable {
     func ask(_ run: RunRecord, _ state: inout ChatState, _ ctx: ContextBuilder, instructions: String, schema: Schema,
              emit: @escaping ChatEmit) async -> JSONValue? {
         let model = model(run)
-        let fixed = Int(Double(instructions.count + schema.estimatedChars) * 1.3)
-        var budget = max(Self.minPromptChars, min(self.budget, Self.contextChars - fixed))
+        var budget = promptBudget(instructions: instructions, schema: schema)
         for _ in 0..<4 {
             do {
                 return try await model.stream(ctx.build(budget: budget).text, instructions: instructions, schema: schema) { partial in
                     if let r = partial["reply"]?.string, !r.isEmpty { emit("delta", r) }
                 }
             } catch let e as LLMError where e.contextOverflow {
-                // Counted, so `make eval` and the Graph page show how often the estimate was wrong.
+                // Counted, so `make eval` and Settings → Data show how often the estimate was wrong.
                 graph.record("overflow", node: state.intent ?? GraphSync.root, conversation: run.id, payload: .number(Double(budget)))
                 budget = budget * 2 / 3
             } catch {
@@ -516,6 +546,13 @@ public final class ChatEngine: Sendable {
         return nil
     }
 
+    /// Characters the prompt may take in one call: what the instructions and the schema leave of the window, up to
+    /// the budget.
+    func promptBudget(instructions: String, schema: Schema) -> Int {
+        let fixed = Int(Double(instructions.count + schema.estimatedChars) * 1.3)
+        return max(Self.minPromptChars, min(budget, contextChars - fixed))
+    }
+
     static func steps(_ answer: JSONValue) -> [PlannedStep] {
         (answer["steps"]?.array ?? []).compactMap { s in
             guard let tool = s["tool"]?.string else { return nil }
@@ -525,7 +562,7 @@ public final class ChatEngine: Sendable {
 
     /// Checks proposed steps: names become addresses, then bibi's rules bind them. Steps already proposed in this
     /// chat (run or skipped) aren't offered again.
-    func bind(_ steps: [PlannedStep], run: RunRecord, said: String, request: String, editing: [BoundAction] = []) async -> Planner.Result {
+    func bind(_ steps: [PlannedStep], run: RunRecord?, said: String, request: String, editing: [BoundAction] = []) async -> Planner.Result {
         let planner = Planner(registry: harness.registry, env: harness.env(admin: NoAdminRunner(), reporter: SilentReporter()),
                               skill: { [harness] in harness.skill(named: $0) })
         // A step for an action the user is filling in starts from the form's values; the step's own values win,
@@ -546,7 +583,7 @@ public final class ChatEngine: Sendable {
         let links = Recipes.unknownLinks(people.steps, said: said)
         var plan = Planner.Result()
         for (s, gaps) in zip(people.steps, zip(people.problems, links).map { $0.merging($1) { a, _ in a } }) {
-            switch planner.bind(s) {
+            switch planner.bind(s).flatMap(turnedOff) {
             case .success(let actions):
                 // A recipient taken out of a step says why under its field.
                 plan.actions += actions.map { a in
@@ -558,20 +595,38 @@ public final class ChatEngine: Sendable {
             case .failure(let e): plan.refusals.append(e.description)
             }
         }
-        let earlier = Set((run.report()?.actions ?? []).map { JSON.string($0.call) })
+        let earlier = Set((run?.report()?.actions ?? []).map { JSON.string($0.call) })
         plan.actions.removeAll { earlier.contains(JSON.string($0.call)) }
         return plan
     }
 
+    static let repairInstruction = "Fix the steps using what the user already said (for an email or message, write the text from the request). "
+        + "If only the user knows what is missing (who, which address, what to say), propose no steps and ask one short question in the user's language."
+
+    /// Registry actions and apps (bundle ids) turned off in Settings: chat neither offers nor binds them.
+    func disabledTools() -> (actions: Set<String>, apps: Set<String>) {
+        (Set(graph.nodes(kind: "action", status: "disabled").map(\.name)), Set(knobs.list(Knobs.appsDisabled)))
+    }
+
+    /// Fails when a bound action (or the app an app call drives) is turned off in Settings.
+    func turnedOff(_ actions: [BoundAction]) -> Result<[BoundAction], ActionError> {
+        let off = disabledTools()
+        for a in actions {
+            if off.actions.contains(a.call.spec) { return .failure(ActionError("\(a.call.spec) is turned off in Settings")) }
+            if a.call.spec == "run_app_call", let name = a.call.params["app"],
+               let bundle = harness.apps.catalog.app(name)?.bundleID ?? Optional(name), off.apps.contains(bundle) {
+                return .failure(ActionError("\(harness.apps.catalog.app(name)?.name ?? name) is turned off in Settings"))
+            }
+        }
+        return .success(actions)
+    }
+
     /// The steps and what is wrong with them, for the model to fix (or for the next turn, with the request).
-    static func problems(_ steps: [PlannedStep], _ refusals: [String], request: String? = nil) -> String {
+    static func problems(_ steps: [PlannedStep], _ refusals: [String], request: String? = nil, fix: String = repairInstruction) -> String {
         var lines = request.map { ["Request: " + Text.oneLine($0, max: 300)] } ?? []
         lines += steps.map { "Step: \($0.tool) \(JSON.string($0.args))" }
         lines += refusals.map { "Problem: " + $0 }
-        if request == nil {
-            lines.append("Fix the steps using what the user already said (for an email or message, write the text from the request). "
-                         + "If only the user knows what is missing (who, which address, what to say), propose no steps and ask one short question in the user's language.")
-        }
+        if request == nil { lines.append(fix) }
         return lines.joined(separator: "\n")
     }
 
@@ -633,7 +688,7 @@ public final class ChatEngine: Sendable {
     /// Skills whose keywords or description share words with the request, ranked by those hits plus embedding
     /// similarity, weighted by how often their proposals were approved. Skills that match nothing aren't offered:
     /// a small model picks a listed skill too eagerly.
-    func rankSkills(_ text: String, _ v: [Float]?, limit: Int = 3) -> [GraphNode] {
+    func rankSkills(_ text: String, _ v: [Float]?, limit: Int? = nil) -> [GraphNode] {
         graph.nodes(kind: "skill", status: "active").filter { $0.id != GraphSync.root && harness.skill(named: $0.name) != nil }
             .compactMap { n -> (GraphNode, Double)? in
                 let described = GraphSync.text(n)
@@ -644,10 +699,10 @@ public final class ChatEngine: Sendable {
                 let sim = nv.flatMap { a in v.map { Similarity.cosine(a, $0) } } ?? 0
                 return (n, (Double(hits) + sim) * (0.5 + 0.5 * graph.approvalRate(n.id)))
             }
-            .sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
+            .sorted { $0.1 > $1.1 }.prefix(limit ?? knobs.int(.rankSkills)).map(\.0)
     }
 
-    /// What a request would retrieve, without asking the model (the Graph page's "Try it"): the same steps as a
+    /// What a request would retrieve, without asking the model (Settings' Test bench): the same steps as a
     /// turn, minus translation and open forms.
     public struct Retrieval: Codable, Sendable {
         public var skills: [String]
@@ -666,8 +721,12 @@ public final class ChatEngine: Sendable {
     func toolCatalog(_ skills: [GraphNode], request raw: String, examples: [GraphNode], vector: [Float]? = nil) -> (ids: [String], text: String) {
         // "https" in a pasted link shouldn't offer whatever mentions http.
         let request = raw.replacingOccurrences(of: #"\S+://\S+|\S+@\S+\.\S+"#, with: " ", options: .regularExpression)
-        var ids = ["command"]
-        var lines = [#"- command: any program; args = the program, then each argument. Examples: ["df", "-h", "/"] free disk space; ["sw_vers"] macOS version; ["ps", "-Ao", "pid,%cpu,%mem,comm", "-m"] processes by memory; ["du", "-sh", "~/Downloads"] folder size"#]
+        let off = disabledTools()
+        var ids: [String] = [], lines: [String] = []
+        if !off.actions.contains("run_command") {
+            ids.append("command")
+            lines.append(prompts.text("chat.tool.command", default: Self.commandTool))
+        }
         let used = Set(examples.flatMap { SkillMiner.steps($0).map(\.tool) })
         for n in skills {
             guard let s = harness.skill(named: n.name) else { continue }
@@ -676,7 +735,7 @@ public final class ChatEngine: Sendable {
             lines.append("- skill:\(s.name) (thorough, takes a minute): \(Text.oneLine(guidance, max: 300)) \(GraphSync.example(s.params))")
         }
         for (id, a) in Self.actionHints.sorted(by: { $0.key < $1.key }) {
-            guard let spec = harness.registry.spec(id),
+            guard let spec = harness.registry.spec(id), !off.actions.contains(id),
                   used.contains("action:" + id) || Similarity.hits(request, a.words) > 0 else { continue }
             ids.append("action:" + id)
             lines.append("- action:\(id) \(a.hint): \(spec.summary)")
@@ -688,7 +747,8 @@ public final class ChatEngine: Sendable {
         let covered = Set(ids.compactMap { $0.hasPrefix("action:") ? Recipes.apps[String($0.dropFirst(7))] : nil })
         let launching = ids.contains("action:open_app")
         for n in rankCapabilities(request, vector, examples: used) {
-            guard let bundle = n.props["app"]?.string, !covered.contains(bundle), let app = harness.apps.catalog.app(bundle),
+            guard let bundle = n.props["app"]?.string, !covered.contains(bundle), !off.apps.contains(bundle),
+                  let app = harness.apps.catalog.app(bundle),
                   covered.isEmpty && !launching || Recipes.mentioned(app.name, in: request),
                   let hint = AppScripts.hint(app, op: n.props["op"]?.string ?? "", term: n.props["term"]?.string ?? "") else { continue }
             if !ids.contains("app:" + app.name) { ids.append("app:" + app.name) }
@@ -699,9 +759,9 @@ public final class ChatEngine: Sendable {
 
     /// Scriptable-app commands and classes whose words match the request (or that a retrieved example used),
     /// ranked by those hits plus embedding similarity.
-    func rankCapabilities(_ text: String, _ v: [Float]?, examples used: Set<String>, limit: Int = 3) -> [GraphNode] {
+    func rankCapabilities(_ text: String, _ v: [Float]?, examples used: Set<String>, limit: Int? = nil) -> [GraphNode] {
         let usedApps = Set(used.filter { $0.hasPrefix("app:") }.map { String($0.dropFirst(4)).lowercased() })
-        return graph.nodes(kind: "capability").compactMap { n -> (GraphNode, Double)? in
+        return graph.nodes(kind: "capability", status: "active").compactMap { n -> (GraphNode, Double)? in
             let hits = Similarity.hits(text, n.name + " " + n.text)
             let example = usedApps.contains((n.name.split(separator: " ").first.map(String.init) ?? "").lowercased())
             guard hits > 0 || example else { return nil }
@@ -710,38 +770,39 @@ public final class ChatEngine: Sendable {
             let sim = nv.flatMap { a in v.map { Similarity.cosine(a, $0) } } ?? 0
             return (n, Double(hits) + sim + (example ? 1 : 0))
         }
-        .sorted { $0.1 > $1.1 }.prefix(limit).map(\.0)
+        .sorted { $0.1 > $1.1 }.prefix(limit ?? knobs.int(.rankCapabilities)).map(\.0)
     }
 
     /// The request in English (retrieval, examples and embeddings are English), or the request itself when it
     /// already is or the model can't translate it.
-    func english(_ run: RunRecord, _ text: String) async -> String {
+    func english(_ run: RunRecord?, _ text: String) async -> String {
         let recognizer = NLLanguageRecognizer()
         recognizer.processString(text)
         // Short or mixed messages ("ok", "try again") stay as they are: a guess would only cost a model call.
-        guard let (lang, p) = recognizer.languageHypotheses(withMaximum: 1).first, lang != .english, p >= 0.5,
+        guard let (lang, p) = recognizer.languageHypotheses(withMaximum: 1).first, lang != .english, p >= knobs[.translateConfidence],
               let r = try? await model(run).respond(text, instructions: prompts.text("chat.translate", default: Self.translateInstructions),
                                                      schema: Self.translateSchema),
               let t = r["english"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return text }
-        return Text.clip(t, max: 2000)
+        return Text.clip(t, max: knobs.int(.inputMax))
     }
 
     /// Up to three requests that worked (learned or seeded) sharing words with this one, best first; learned
     /// ones win ties and frequently matched ones rank higher. One shared word is chance (a name, "repo") unless
     /// the example used a tool this request's own words select (its `used` edges in the graph).
     func exampleIntents(_ text: String, tools: [String]) -> [GraphNode] {
+        let minWords = knobs.int(.exampleWords)
         let terms = Similarity.terms(text), selected = Set(tools).subtracting(["command"])
         let ranked = graph.nodes(kind: "intent").filter { $0.props["outcome"]?.string == "ok" && $0.status != "disabled" }
             .compactMap { n -> (GraphNode, Double)? in
                 let hits = terms.intersection(Similarity.terms(GraphSync.text(n))).count
                 let answered = Set(graph.edges(from: n.id, kind: "used").map(\.dst) + SkillMiner.steps(n).map(\.tool))
-                guard hits >= 2 || hits == 1 && !answered.isDisjoint(with: selected) else { return nil }
+                guard hits >= minWords || hits >= 1 && !answered.isDisjoint(with: selected) else { return nil }
                 let used = graph.edges(from: n.id, kind: "matched").reduce(0) { $0 + $1.weight }
                 return (n, Double(hits) + (n.props["seed"] == nil ? 0.5 : 0) + min(1, used / 10))
             }
             .sorted { $0.1 > $1.1 }
         var seen = Set<String>(), out: [GraphNode] = []
-        for (n, _) in ranked where out.count < 3 && seen.insert(GraphSync.text(n).lowercased()).inserted { out.append(n) }
+        for (n, _) in ranked where out.count < knobs.int(.examples) && seen.insert(GraphSync.text(n).lowercased()).inserted { out.append(n) }
         return out
     }
 
@@ -767,7 +828,7 @@ public final class ChatEngine: Sendable {
         let pool = (graph.search(text, kind: "fact", limit: 10) + graph.nodes(kind: "fact").prefix(40))
             .filter { seen.insert($0.id).inserted && !Self.isRequest($0.text) }
         return pool.map { ($0, Similarity.score(text, v, $0.name + " " + $0.text, graph.vector($0.id))) }
-            .filter { $0.1 >= 0.35 }.sorted { $0.1 > $1.1 }.prefix(3)
+            .filter { $0.1 >= knobs[.factSimilarity] }.sorted { $0.1 > $1.1 }.prefix(knobs.int(.facts))
             .map { "- \($0.0.text) (\(ago($0.0.updated)))" }.joined(separator: "\n")
     }
 
@@ -1025,10 +1086,10 @@ public final class ChatEngine: Sendable {
         let miner = SkillMiner(graph: graph, model: model(run), prompts: prompts)
         guard let c = await miner.observe(intent) else { return }
         state.candidates.append(c.id)
-        let size = c.props["size"]?.int ?? SkillMiner.minOccurrences
+        let size = c.props["size"]?.int ?? knobs.int(.minOccurrences)
         emit("candidate", JSON.string(SkillLibrary.view(c, graph: graph)))
         say(run, &state, ChatMessage("note", "You've asked for this \(size) times. I can keep it as a skill, \"\(c.name)\": "
-                                     + (c.props["help"]?.string ?? "") + " Accept it under Skills, or here."), emit)
+                                     + (c.props["help"]?.string ?? "") + " Accept it under Settings → Skills, or here."), emit)
     }
 
     // MARK: compaction
@@ -1038,9 +1099,10 @@ public final class ChatEngine: Sendable {
         // Notes are the current task's working memory; older ones are in the summary through their result messages.
         let kept = (state.notes ?? []).filter { $0.turn >= state.turns - 1 }
         state.notes = kept.isEmpty ? nil : kept
-        guard state.recent.count > Self.keepMessages else { return }
-        let msgs = Array(state.recent.dropLast(Self.keepMessages))
-        state.recent = Array(state.recent.suffix(Self.keepMessages))
+        let keep = keepMessages
+        guard state.recent.count > keep else { return }
+        let msgs = Array(state.recent.dropLast(keep))
+        state.recent = Array(state.recent.suffix(keep))
         let line = { (m: ChatMessage) in
             "\(["user": "User", "bibi": "bibi", "result": "Result", "note": "Note"][m.role] ?? m.role): \(Text.clip(m.text, max: 500))"
         }

@@ -249,7 +249,7 @@ final class Events: @unchecked Sendable {
         let run = try chat.start()
         for i in 0..<4 { await chat.send(run, "message \(i): the Mac says hello", emit: Events().emit) }
         let state = chat.state(run)
-        #expect(state.recent.count <= ChatEngine.keepMessages)
+        #expect(state.recent.count <= Int(Knob.keepMessages.builtIn))
         #expect(state.summary == "The user checks things.")
         #expect(chat.transcript(run).count == 8)
         #expect(graph.nodes(kind: "fact").first?.text == "The Mac says hello")

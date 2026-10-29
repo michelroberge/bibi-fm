@@ -8,6 +8,15 @@ public struct OptimizeStorage: Skill {
     public let help = "Analyze disk usage and recommend (and run) the top cleanup actions"
     public let keywords = "cleanup clean free up storage full large big files reclaim space"
     public var aliases: [String] { ["optimize-storage"] }
+    public var prompts: [PromptDefinition] {
+        [PromptDefinition("storage.verdict", "Judge a folder", group: PromptCatalog.analysis,
+                          purpose: "Decides for each big folder whether it is safe to clean, worth looking inside, or to keep.",
+                          builtIn: Analyze.verdictInstructions, schema: Analyze.verdictSchema,
+                          sample: "Path: ~/Library/Caches/com.spotify.client\nSize: 2.1 GB\nHint: application cache, regenerated automatically"),
+         PromptDefinition("storage.consolidate", "Combine cleanup actions", group: PromptCatalog.analysis,
+                          purpose: "Decides whether several cleanups inside one folder should become one action on the folder.",
+                          builtIn: Analyze.consolidateInstructions, schema: Analyze.consolidateSchema)]
+    }
     public var params: [Param] {
         [
             .positional("path", help: "folder to analyze (default: your home folder)", default: "~"),

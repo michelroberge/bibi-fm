@@ -113,6 +113,27 @@ public enum CommandPolicy {
     /// Commands that need root to be useful even for reading; proposing them without sudo just fails.
     static let rootOnly: Set<String> = ["powermetrics", "fs_usage", "dtrace", "opensnoop", "smartctl"]
 
+    /// Why a program can't be on the user's allow list (Settings), or nil if it can. Allowed programs count as
+    /// read-only, so they may run without a card with "Let bibi look": nothing that runs code, sends mail or changes
+    /// files can be allowed.
+    public static func notAllowable(_ program: String) -> String? {
+        let name = Paths.name(program.trimmingCharacters(in: .whitespaces))
+        if name.isEmpty || name.contains(" ") { return "give one program name, like \"ioreg\"" }
+        if shells.contains(name) || ["sudo", "su", "doas"].contains(name) { return "\(name) runs other programs" }
+        if interpreters.contains(name) { return "\(name) runs code bibi can't show" }
+        if destructive.contains(name) || name == "rm" { return "\(name) changes files" }
+        if ["osascript", "mail", "mailx", "sendmail"].contains(name) { return "\(name) controls apps or sends mail" }
+        if rootOnly.contains(name) { return "\(name) needs administrator rights" }
+        return nil
+    }
+
+    /// bibi's built-in rules, for Settings (read-only).
+    public static var rules: [String: [String]] {
+        ["read-only programs": readOnly.sorted(), "shells (refused)": shells.sorted(), "interpreters (version only)": interpreters.sorted(),
+         "shell operators (refused)": operators.sorted(), "file commands (protected paths refused)": destructive.sorted(),
+         "network tools": networkTools.sorted(), "need sudo": rootOnly.sorted(), "read-only subcommands only": readSubcommands.keys.sorted()]
+    }
+
     /// Expands a leading ~ (argv isn't run by a shell, so nothing else would).
     public static func expand(_ arg: String, home: String = Paths.home) -> String {
         if arg == "~" { return home }
@@ -136,6 +157,7 @@ public enum CommandPolicy {
         guard let exe = argv.first else { return refuse("empty command") }
         let name = Paths.name(exe)
         let args = Array(argv.dropFirst())
+        if policy.blockCommands.contains(name) { return refuse("\(name) is blocked in Settings") }
 
         if argv.count == 1, exe.contains(" ") {
             return refuse("the command was written as one string; give the program and each argument separately")
@@ -187,6 +209,7 @@ public enum CommandPolicy {
         }
 
         let readsOnly = readOnly.contains(name) && (readSubcommands[name]?(args) ?? true)
+            || policy.allowCommands.contains(name) && notAllowable(name) == nil
         if admin {
             verdict.cls = .admin
         } else if rootOnly.contains(name) {
@@ -234,7 +257,7 @@ public struct RunCommand: ActionSpec {
 
     public func execute(_ p: Params, _ env: ActionEnv) async throws -> Outcome {
         let v = try check(p, env)
-        let timeout = p["timeout"].flatMap(Double.init) ?? 120
+        let timeout = p["timeout"].flatMap(Double.init) ?? env.knobs[.commandTimeout]
         let text: String
         if admin {
             text = try await env.admin.run(v.argv)

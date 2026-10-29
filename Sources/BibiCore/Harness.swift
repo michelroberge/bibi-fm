@@ -28,7 +28,15 @@ public final class Harness: Sendable {
     public let skills: [String: any Skill]
     public let registry: ActionRegistry
     public let store: RunStore
-    public let policy: SafetyPolicy
+    let basePolicy: SafetyPolicy
+    /// The safety rules with the user's command allow and block lists from Settings.
+    public var policy: SafetyPolicy {
+        var p = basePolicy
+        let knobs = Knobs(graph)
+        p.allowCommands = Set(knobs.list(Knobs.policyAllow))
+        p.blockCommands = Set(knobs.list(Knobs.policyBlock))
+        return p
+    }
     /// bibi.db: skill tree, prompts, statistics and learned skills. nil = none (tests, or if it can't be opened).
     public let graph: GraphStore?
     /// Mail, Calendar, Reminders, Contacts, FaceTime and the catalog of scriptable apps.
@@ -47,7 +55,7 @@ public final class Harness: Sendable {
         self.skills = d
         self.registry = registry
         self.store = store
-        self.policy = policy
+        self.basePolicy = policy
         self.graph = graph
         self.apps = apps
         self.makeModel = model
@@ -59,6 +67,12 @@ public final class Harness: Sendable {
 
     public var model: any LanguageModel { makeModel() }
     public var prompts: PromptBook { PromptBook(graph) }
+
+    /// Every prompt Settings can show: bibi's, the skills' own, and each skill's guidance (generic first).
+    public var promptCatalog: [PromptDefinition] {
+        PromptCatalog.core + sortedSkills.flatMap(\.prompts)
+            + [PromptCatalog.guidance("generic", help: "")] + sortedSkills.map { PromptCatalog.guidance($0.name, help: $0.help) }
+    }
 
     /// Re-reads the active learned skills from the graph.
     public func reloadLearned() {
@@ -106,7 +120,7 @@ public final class Harness: Sendable {
     }
 
     public func env(admin: any AdminRunner, reporter: any Reporter) -> ActionEnv {
-        ActionEnv(policy: policy, admin: admin, reporter: reporter, apps: apps)
+        ActionEnv(policy: policy, admin: admin, reporter: reporter, apps: apps, knobs: Knobs(graph))
     }
 
     public func preview(_ actions: [BoundAction], env: ActionEnv, run: RunRecord? = nil) -> [Preview] {

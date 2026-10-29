@@ -1,23 +1,31 @@
-# bibi: parked work
+# bibi: next steps
 
-Status as of 2026-10-26. The Swift rewrite, the harness, the web UI and chat (with the graph store and skill learning) are done.
-Five skills are implemented: `storage.optimize`, `net.identify`, `dev.cleanup`, `sys.health` and `sec.audit`.
-The items below are parked.
+As of 2026-10-28. What shipped is in the README; `make eval` and its numbers are in [eval.md](eval.md).
+
+## Chat, in order
+
+- **Retrieval.** A seed that shares one word with the request is lost ("is my firewall on?" vs "is the firewall
+  on"), so the model invents (`systemctl`) or copies the fixed examples in the `command` tool line (`ps` for a
+  port). Sentence embeddings barely separate short requests (cosine 0.3–0.5 for related and unrelated alike), so
+  keywords do the work. Try `NLContextualEmbedding` (multilingual, better on short text) behind `Embedder` and
+  BM25 for examples; keep whichever the eval scores higher. Multilingual vectors could also drop the translation
+  call for retrieval. Let learned skills grow their keywords from their example requests.
+- **Routing.** A tiny call ahead of `ChatTurn` (answer / one step / several steps), so "hello" and "what does
+  kernel_task do?" get an answer instead of whatever tool is listed, and multi-step requests go straight to the
+  look loop.
+- **Seeds for what the eval gets wrong**: firewall and FileVault state, battery (`system_profiler`), last restart
+  (`uptime`). The model still adds unrequested steps now and then: watch the approval statistics.
+- **Episodic memory.** Store each chat's final summary as a node with a vector, and retrieve the top two into new
+  chats as "Earlier chats".
+- A terminal chat (`bibi chat`) reusing the approval prompt.
+- Chat about a finished run ("explain F3", "undo what you did yesterday") through read-only tools over history and
+  reports.
 
 ## sw.inventory (software inventory and maintenance)
 
-Partly written; not registered in `Sources/BibiSkills/All.swift`.
+`Sources/BibiSkills/Sw/Collect.swift`, `Sw/Specs.swift` and the online clients (`PackageManagers`, `EndOfLife`,
+`OSV`, `Version.bump`) exist; the skill itself isn't written or registered in `Sources/BibiSkills/All.swift`.
 
-Done:
-- `Sources/BibiSkills/Sw/Collect.swift`:
-  - apps: Info.plist, Mach-O architecture, last-used date via Spotlight, App Store receipt
-  - Homebrew JSON parser, plus a local reverse-dependency map
-  - global npm and pipx parsers
-  - runtimes on PATH with their install source
-- `Sources/BibiSkills/Sw/Specs.swift`: `brew_upgrade`, `brew_uninstall` (leaves only), `npm_global_uninstall`
-- Online clients in core: `PackageManagers` (brew, npm, pip, softwareupdate), `EndOfLife`, `OSV`, `Version.bump`
-
-To do:
 - `Sw/Inventory.swift` skill. Findings:
   - duplicate apps (same bundle id in two places)
   - Intel-only apps on Apple Silicon
@@ -35,26 +43,13 @@ To do:
 - Facts: apps `{name: version}`, brew `{name: version}`, runtimes set.
 - Register the action specs, add fixture tests (brew JSON, npm, pipx, Mach-O headers) and a README section.
 
-## Other open items
+## Other
 
-- Remove the Python implementation (`bibi/`, `tests/test_bibi.py`) after a final side-by-side run. The Swift port has parity.
+- Check in a real browser: approve, execute, the admin password dialog, undo, the Changes page; in chat, streaming
+  replies, dry run, accepting a candidate from the chat card, "Work it out", and "Let bibi look" (no card for
+  read-only steps, a card for a write, every auto-run command in the run's journal).
+- Remove the Python implementation (`bibi/`, `tests/test_bibi.py`) after a final side-by-side run. The Swift port
+  has parity.
 - Tests for `sec.audit` parsers: `SecParse.firewall`, `lsof -F` and `persistenceFlags` with fixtures.
-- Check the web UI in a real browser: approve, execute, the admin password dialog, undo, and the Changes page.
-- `net.identify` by MAC: macOS hides the ARP table from processes without Local Network permission (sysctl returns 0 bytes). Look into a signed or bundled helper, or document how to grant the permission.
-
-## Chat and learning: next steps
-
-Chat, the graph store (`bibi.db`), skill learning, notes (what the steps found, instead of raw output) and the
-"Let bibi look" loop shipped. `make eval` measures chat against the real model (`docs/eval.md`). Still open, in order:
-- Retrieval loses seeds that share one word with the request ("is my firewall on?" vs "is the firewall on"): try
-  `NLContextualEmbedding` (multilingual, better on short text) behind `Embedder`, and BM25 for examples, and keep
-  whichever the eval scores higher. That could also drop the translation call for retrieval.
-- A tiny routing call ahead of `ChatTurn` (single step / multi-step / answer), so "hello" gets an answer instead of
-  whatever tool is listed, and multi-step requests go straight to the look loop.
-- Episodic memory: store each chat's final summary as a node with a vector, and retrieve the top two into new chats.
-- Check chat in a real browser: streaming replies, approving an admin step (password dialog), dry run, and accepting a candidate from the chat card.
-- Chat with the on-device model is good at single read-only commands and at mapping to registry actions. It is weaker at multi-step plans and sometimes adds unrequested extra steps. Watch the approval statistics on the Skills page and add starter examples (`Sources/BibiCore/Graph/Seeds.swift`) for requests it gets wrong.
-- Retrieval uses skill keywords plus NaturalLanguage sentence embeddings. Embeddings barely separate short requests (cosine 0.3–0.5 for related and unrelated alike), so keywords do most of the work. Let learned skills grow their keywords from their example requests.
-- Facts from compaction are filtered by grounding, but are still noisy. Consider showing remembered facts on the Skills page so they can be deleted.
-- A terminal chat (`bibi chat`) reusing the approval prompt.
-- Chat about a finished run ("explain F3", "undo what you did yesterday") through read-only tools over history and reports.
+- `net.identify` by MAC: macOS hides the ARP table from processes without Local Network permission (sysctl returns
+  0 bytes). Look into a signed or bundled helper, or document how to grant the permission.

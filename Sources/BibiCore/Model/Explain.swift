@@ -92,6 +92,24 @@ public struct Explainer: Sendable {
         return max(max(0, rule - maxLower), min(model, upper))
     }
 
+    static let correlateSchema = Schema("Correlation", [
+        .init("hypotheses", .array(.object(Schema("Hypothesis", [
+            .init("title", .string, "short"),
+            .init("explanation", .string, "two sentences"),
+            .init("cites", .array(.string, max: 8), "finding ids and observation ids"),
+            .init("confidence", .int(0...100)),
+            .init("diagnostics", .array(.choice(Diagnostics.all.map(\.id)), max: 2)),
+        ])), max: 3)),
+    ])
+
+    /// The explanation schema for a finding without recommendations (Settings tries it with this one).
+    static let explainSchema = Schema("Explanation", [
+        .init("explanation", .string, "two or three sentences"),
+        .init("cites", .array(.string, max: 6), "observation ids, e.g. o3"),
+        .init("confidence", .int(0...100)),
+        .init("diagnostics", .array(.choice(Diagnostics.all.map(\.id)), max: 2)),
+    ])
+
     static let correlateInstructions = """
     You look for connections between findings from one macOS check, e.g. high CPU, heat and a failing battery,
     or a new listening port and a new login item from the same app.
@@ -122,15 +140,7 @@ public struct Explainer: Sendable {
                 .map { "\($0.id) \($0.text.prefix(90))" }.joined(separator: "; ")
             lines.append("\(f.id) [\(f.severity.rawValue)] \(f.title) — \(ev)")
         }
-        let schema = Schema("Correlation", [
-            .init("hypotheses", .array(.object(Schema("Hypothesis", [
-                .init("title", .string, "short"),
-                .init("explanation", .string, "two sentences"),
-                .init("cites", .array(.string, max: 8), "finding ids and observation ids"),
-                .init("confidence", .int(0...100)),
-                .init("diagnostics", .array(.choice(Diagnostics.all.map(\.id)), max: 2)),
-            ])), max: 3)),
-        ])
+        let schema = Self.correlateSchema
         do {
             let r = try await model.respond(lines.joined(separator: "\n"), instructions: prompts.text("correlate", default: Self.correlateInstructions),
                                             schema: schema, as: Correlation.self)

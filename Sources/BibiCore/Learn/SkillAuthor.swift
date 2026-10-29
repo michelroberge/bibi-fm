@@ -2,10 +2,10 @@ import Foundation
 
 /// `skills.create`: drafts a learned skill from the user's description ("show free space and the biggest files in
 /// ~/Downloads"). The model writes it with the tools chat has; bibi keeps only steps its rules accept and saves the
-/// draft as a candidate, so nothing runs until the user accepts it under Skills (and fine-tunes it on the Graph page).
+/// draft as a candidate, so nothing runs until the user accepts it under Settings → Skills (and fine-tunes it there).
 public struct SkillAuthor: Skill {
     public let name = "skills.create"
-    public let help = "Drafts a new skill from your description of what it should do; you review it under Skills before it can run"
+    public let help = "Drafts a new skill from your description of what it should do; you review it under Settings → Skills before it can run"
     public var keywords: String { "create make new build write teach skill automate routine shortcut" }
     public var params: [Param] {
         [Param(key: "request", flags: [], kind: .list, help: "what the skill should do, in your words", defaultValue: nil,
@@ -88,7 +88,7 @@ public struct SkillAuthor: Skill {
         let cite = ev.observe("draft of \"\(title)\"", listing.ifEmpty("(no usable steps)"))
         guard !steps.isEmpty else {
             ev.find("skill", "No skill drafted", severity: .info, cites: [cite], confidence: 50,
-                    explanation: "None of the drafted steps passed bibi's rules. Describe it again more concretely, or add the steps on the Graph page.")
+                    explanation: "None of the drafted steps passed bibi's rules. Describe it again more concretely, or write the skill by hand under Settings → Skills.")
             return SkillResult(summary: "No skill drafted: none of the steps passed bibi's rules.", observations: ev.allObservations,
                                findings: ev.allFindings, notes: notes)
         }
@@ -100,7 +100,7 @@ public struct SkillAuthor: Skill {
         } else {
             let node = save(title: title, help: help, keywords: draft["keywords"]?.string ?? "", request: request, steps: steps, params: kept)
             facts["candidate"] = .string(node.id)
-            summary += " Keep it under Skills to use it as bibi \(node.name)."
+            summary += " Keep it under Settings → Skills to use it as bibi \(node.name)."
         }
         ev.find("skill", "Drafted skill: \(title)", severity: .info, cites: [cite], confidence: 60,
                 explanation: help + "\n" + listing + (kept.isEmpty ? "" : "\nParameters: " + kept.joined(separator: ", ")))

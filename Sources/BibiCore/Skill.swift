@@ -50,6 +50,8 @@ public protocol Skill: Sendable {
     var factsSpec: FactsSpec { get }
     /// Actions this skill contributes to the registry.
     var actionSpecs: [any ActionSpec] { get }
+    /// The skill's own model prompts, for Settings (each read with `ctx.prompts.text(id, default:)`).
+    var prompts: [PromptDefinition] { get }
     func run(_ args: Args, _ ctx: SkillContext) async throws -> SkillResult
     /// Called after actions ran (not on dry runs); returns a line to show, e.g. space reclaimed.
     func afterRun(_ result: SkillResult, _ ctx: SkillContext) async -> String?
@@ -64,6 +66,7 @@ extension Skill {
     public var onlineByDefault: Bool { false }
     public var factsSpec: FactsSpec { FactsSpec() }
     public var actionSpecs: [any ActionSpec] { [] }
+    public var prompts: [PromptDefinition] { [] }
     public func afterRun(_: SkillResult, _: SkillContext) async -> String? { nil }
     public func comparable(_: [String: JSONValue], _: [String: JSONValue]) -> Bool { true }
     public var namespace: String { String(name.split(separator: ".").first ?? "") }

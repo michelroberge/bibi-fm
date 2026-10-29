@@ -39,6 +39,8 @@ public struct GraphSkill: Skill {
         }
     }
 
+    static let summarySchema = Schema("Summary", [.init("summary", .string, "two or three sentences")])
+
     static let summaryInstructions = """
     You summarize the output of commands that ran on the user's Mac, for the user, in two or three plain sentences.
     Only use facts from the output. Mention the numbers that answer the request.
@@ -74,7 +76,7 @@ public struct GraphSkill: Skill {
             let obs = ev.allObservations
             let prompt = "Request: \(help)\n" + obs.map { "$ \($0.source)\n\(Text.clip($0.text, max: 1200))" }.joined(separator: "\n")
             if let r = try? await ctx.model.respond(prompt, instructions: ctx.prompts.text("learned.summary", default: Self.summaryInstructions),
-                                                    schema: Schema("Summary", [.init("summary", .string, "two or three sentences")])),
+                                                    schema: Self.summarySchema),
                let s = r["summary"]?.string, !s.isEmpty {
                 summary = s
             } else {
