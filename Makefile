@@ -2,7 +2,7 @@ PREFIX ?= $(HOME)/.local
 BIN := $(PREFIX)/bin
 LIBEXEC := $(PREFIX)/libexec/bibi
 
-.PHONY: build release test install uninstall clean bump signing-identity ci
+.PHONY: build release test eval install uninstall clean bump signing-identity ci
 
 # Builds are signed with "bibi local code signing" when it exists (make signing-identity), so macOS keeps
 # bibi's permissions (Contacts, Calendars, Reminders, Automation) across builds.
@@ -17,6 +17,10 @@ release:
 
 signing-identity:
 	scripts/make-signing-identity.sh
+
+# Chat against the real on-device model: tool choice, calls, seconds, overflows (needs Apple Intelligence).
+eval:
+	swift run bibi-eval
 
 test:
 	swift run bibi-tests

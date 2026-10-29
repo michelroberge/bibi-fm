@@ -58,5 +58,13 @@ let package = Package(
             swiftSettings: testingFlags.swift + [.unsafeFlags(["-enable-testing"])] + strict,
             linkerSettings: testingFlags.linker
         ),
+        // Measures chat against the real on-device model (`swift run bibi-eval` / `make eval`). Not a test: it needs
+        // Apple Intelligence and takes minutes, so CI doesn't run it.
+        .executableTarget(
+            name: "bibi-eval",
+            dependencies: ["BibiCore", "BibiSkills"],
+            path: "tests/BibiEval",
+            swiftSettings: strict
+        ),
     ]
 )

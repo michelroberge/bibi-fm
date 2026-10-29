@@ -30,6 +30,11 @@ func turn(_ intent: String, reply: String, steps: [(String, [String])] = []) -> 
              "steps": .array(steps.map { .object(["tool": .string($0.0), "args": .strings($0.1), "purpose": .string("test")]) })])
 }
 
+func next(done: Bool = false, steps: [(String, [String])] = [], reply: String = "") -> JSONValue {
+    .object(["done": .bool(done), "reply": .string(reply),
+             "steps": .array(steps.map { .object(["tool": .string($0.0), "args": .strings($0.1), "purpose": .string("test")]) })])
+}
+
 let compactAnswer: JSONValue = .object(["summary": .string("The user checks things."),
                                         "facts": .array([.object(["subject": .string("greeting"), "statement": .string("The Mac says hello")])])])
 
@@ -73,8 +78,11 @@ final class Events: @unchecked Sendable {
         #expect(results.first?.ok == true && results.first?.output == "hello from bibi")
         // The output is evidence in the report, the follow-up answered from it, and the intent learned what worked.
         #expect(run.report()?.observations.first?.text == "hello from bibi")
-        #expect(model.last("ChatAnswer").contains("Results of the steps the user approved"))
+        // A short output is one note as it is; the model answers from the notes, not the raw output.
+        #expect(model.last("ChatAnswer").contains("What the steps found"))
         #expect(model.last("ChatAnswer").contains("hello from bibi"))
+        #expect(chat.state(run).notes?.map(\.text) == ["hello from bibi"])
+        #expect(graph.stats(GraphSync.root)["auto"] == nil)
         let transcript = chat.transcript(run)
         #expect(transcript.map(\.role) == ["user", "bibi", "result", "bibi"])
         #expect(transcript.last?.text == "The Mac said: hello from bibi.")
@@ -87,6 +95,104 @@ final class Events: @unchecked Sendable {
         await #expect(throws: ActionError.self) {
             try await chat.decide(run, ChatDecision(approve: [action.id]), admin: RecordingAdminRunner(), emit: events.emit)
         }
+    }
+
+    @Test func longOutputsBecomeGroundedNotes() async throws {
+        let long = (1...120).map { "w\($0)" }.joined(separator: " ")
+        let model = ScriptedModel([
+            "ChatTurn": [turn("print", reply: "Printing.", steps: [("command", ["echo", long])])],
+            // One line is in the output; the other is the model's invention.
+            "Extract": [.object(["lines": .strings(["w7 w8 w9", "the output has 999 words"])])],
+            "ChatAnswer": [turn("print", reply: "Done.")],
+            "Compact": [compactAnswer],
+        ])
+        let (chat, _, _) = engine(model)
+        let run = try chat.start()
+        await chat.send(run, "print the words", emit: Events().emit)
+        let a = try #require(run.report()?.actions.first)
+        _ = try await chat.decide(run, ChatDecision(approve: [a.id]), admin: RecordingAdminRunner(), emit: Events().emit)
+        #expect(model.count("Extract") == 1)
+        #expect(chat.state(run).notes?.map(\.text) == ["w7 w8 w9"])
+        let prompt = model.last("ChatAnswer")
+        // The notes carry the line; the raw output only reaches the model clipped (its start and end), never whole.
+        #expect(prompt.contains("What the steps found") && prompt.contains("w7 w8 w9") && !prompt.contains("w60 w61 w62"))
+        // The whole output is still in the transcript.
+        #expect(chat.transcript(run).contains { $0.role == "result" && $0.text.contains("w120") })
+    }
+
+    @Test func lookRunsReadOnlyStepsUntilItCanAnswer() async throws {
+        let model = ScriptedModel([
+            "ChatTurn": [turn("check", reply: "Checking.", steps: [("command", ["echo", "first"])])],
+            "Next": [next(steps: [("command", ["echo", "second"])]), next(done: true)],
+            "ChatAnswer": [turn("check", reply: "first and second.")],
+            "Compact": [compactAnswer],
+        ])
+        let (chat, _, graph) = engine(model)
+        let run = try chat.start()
+        await chat.send(run, "check first and second", look: true, emit: Events().emit)
+        // Both steps ran without a card; the answer came from both; bibi's own approvals aren't the user's.
+        #expect(run.journalEntries.filter { $0.event == .executed }.count == 2)
+        #expect(chat.state(run).pending == nil)
+        #expect(chat.transcript(run).map(\.role) == ["user", "bibi", "result", "result", "bibi"])
+        #expect(chat.transcript(run).last?.text == "first and second.")
+        #expect(model.count("Next") == 2 && model.count("ChatAnswer") == 1)
+        #expect(model.last("ChatAnswer").contains("first") && model.last("ChatAnswer").contains("second"))
+        #expect(model.last("Next").contains("What the steps found") && model.last("Next").contains("first"))
+        #expect(graph.stats(GraphSync.root)["auto"] == 2 && graph.stats(GraphSync.root)["approved"] == nil)
+        let intent = try #require(graph.node(chat.state(run).intent ?? ""))
+        #expect(intent.props["signature"]?.string == "command:echo>command:echo")
+    }
+
+    @Test func lookStopsAtAStepThatChangesTheMac() async throws {
+        try "x".write(toFile: tmp + "/gone", atomically: true, encoding: .utf8)
+        let model = ScriptedModel([
+            "ChatTurn": [turn("check", reply: "Checking.", steps: [("command", ["echo", "first"])])],
+            "Next": [next(steps: [("command", ["rm", tmp + "/gone"])], reply: "Then I'd remove it.")],
+            "ChatAnswer": [turn("check", reply: "never")],
+            "Compact": [compactAnswer],
+        ])
+        let (chat, _, _) = engine(model)
+        let run = try chat.start()
+        await chat.send(run, "check and clean", look: true, emit: Events().emit)
+        #expect(run.journalEntries.filter { $0.event == .executed }.count == 1)
+        let pending = try #require(chat.state(run).pending)
+        let card = run.report()?.findings.first { $0.id == pending }?.recommendations ?? []
+        #expect(card.map(\.call.spec) == ["trash_path"])
+        #expect(chat.transcript(run).last?.text == "Then I'd remove it.")
+        #expect(model.count("ChatAnswer") == 0)
+        #expect(FileManager.default.fileExists(atPath: tmp + "/gone"))
+        // The user decides; the answer follows.
+        _ = try await chat.decide(run, ChatDecision(approve: [], skip: card.map(\.id)), admin: RecordingAdminRunner(), emit: Events().emit)
+        #expect(chat.state(run).pending == nil)
+    }
+
+    @Test func lookNeverRepeatsAStepAndStopsAtTheCap() async throws {
+        let model = ScriptedModel([
+            "ChatTurn": [turn("check", reply: "Checking.", steps: [("command", ["echo", "one"])])],
+            "Next": [next(steps: [("command", ["echo", "two"])]), next(steps: [("command", ["echo", "three"])]),
+                     next(steps: [("command", ["echo", "four"])]), next(steps: [("command", ["echo", "five"])])],
+            "ChatAnswer": [turn("check", reply: "done")],
+            "Compact": [compactAnswer],
+        ])
+        let (chat, _, _) = engine(model)
+        let run = try chat.start()
+        await chat.send(run, "check everything", look: true, emit: Events().emit)
+        // Three rounds at most, then the answer.
+        #expect(run.journalEntries.filter { $0.event == .executed }.count == 4)
+        #expect(model.count("Next") == 3 && model.count("ChatAnswer") == 1)
+
+        let again = ScriptedModel([
+            "ChatTurn": [turn("check", reply: "Checking.", steps: [("command", ["echo", "one"])])],
+            "Next": [next(steps: [("command", ["echo", "one"])])],
+            "ChatAnswer": [turn("check", reply: "done")],
+            "Compact": [compactAnswer],
+        ])
+        let (chat2, _, _) = engine(again)
+        let run2 = try chat2.start()
+        await chat2.send(run2, "check it", look: true, emit: Events().emit)
+        // The same step again adds nothing: the loop ends and bibi answers.
+        #expect(run2.journalEntries.filter { $0.event == .executed }.count == 1)
+        #expect(again.count("Next") == 1 && again.count("ChatAnswer") == 1)
     }
 
     @Test func refusedStepsAreExplained() async throws {

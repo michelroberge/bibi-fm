@@ -12,9 +12,13 @@ public struct ChatDecision: Sendable {
     public var reason: String?
     public var adminConfirmed: Bool
     public var dryRun: Bool
+    /// bibi approved these itself ("Let bibi look": read-only steps): counted as `auto`, not as the user's approval.
+    public var auto: Bool
 
-    public init(approve: [String], skip: [String] = [], reason: String? = nil, adminConfirmed: Bool = false, dryRun: Bool = false) {
+    public init(approve: [String], skip: [String] = [], reason: String? = nil, adminConfirmed: Bool = false, dryRun: Bool = false,
+                auto: Bool = false) {
         self.approve = approve; self.skip = skip; self.reason = reason; self.adminConfirmed = adminConfirmed; self.dryRun = dryRun
+        self.auto = auto
     }
 }
 
@@ -28,8 +32,13 @@ public final class ChatEngine: Sendable {
     public let harness: Harness
     public let graph: GraphStore
     let embedder: any Embedder
-    /// Characters of prompt per turn (the on-device model has ~4k tokens for instructions, prompt, schema and answer).
+    /// Characters of prompt per turn, at most (the on-device model has ~4k tokens for instructions, prompt, schema
+    /// and answer; `ask` gives the instructions and schema their share first).
     let budget: Int
+    /// Characters a whole call may take, instructions and schema included: ~2.5k tokens, leaving room for the answer.
+    static let contextChars = 10_000
+    /// The prompt never shrinks below this, whatever the instructions take: the request and the tools must fit.
+    static let minPromptChars = 1500
     /// Messages kept verbatim; older ones are compacted into the summary.
     public static let keepMessages = 4
 
@@ -168,10 +177,12 @@ public final class ChatEngine: Sendable {
     // MARK: a user message
 
     /// `explore`: when no tool fits, work out commands instead of only answering (the chat's "Work it out" toggle).
-    public func send(_ run: RunRecord, _ text: String, explore: Bool = false, emit: @escaping ChatEmit) async {
+    /// `look`: read-only steps run without a card, and bibi keeps looking until it can answer ("Let bibi look").
+    public func send(_ run: RunRecord, _ text: String, explore: Bool = false, look: Bool = false, emit: @escaping ChatEmit) async {
         var state = state(run)
         let question = Text.clip(text.trimmingCharacters(in: .whitespacesAndNewlines), max: 2000)
         guard !question.isEmpty else { return }
+        state.look = look ? true : nil
         if state.turns == 0 {
             state.title = Text.oneLine(question, max: 60)
             var report = run.report() ?? SkillResult(summary: state.title)
@@ -187,6 +198,14 @@ public final class ChatEngine: Sendable {
         say(run, &state, ChatMessage("user", question), emit)
         let english = await english(run, question)
         await think(run, &state, question: question, english: english, previous: previous, explore: explore, emit: emit)
+        // "Let bibi look": steps that only read run right away, no card, and the answer follows from what they found.
+        if let ids = autoApprovable(run, state) {
+            save(run, state)
+            var failed: (any Error)?
+            do { _ = try await decide(run, ChatDecision(approve: ids, auto: true), admin: NoAdminRunner(), emit: emit) } catch { failed = error }
+            state = self.state(run)
+            if let failed { say(run, &state, ChatMessage("note", "Couldn't run the steps: \(failed)"), emit) }
+        }
         await compact(run, &state)
         save(run, state)
     }
@@ -245,14 +264,16 @@ public final class ChatEngine: Sendable {
         // repeat it less precisely (and use the small context). Grounding below still checks the whole conversation.
         ctx.add("Recent messages", editing.isEmpty ? recent : recentText(state, dropLastUser: true, since: previous), priority: 2,
                 maxChars: 2000)
-        ctx.add("Results of the steps the user approved", state.results.joined(separator: "\n\n"), priority: 0, maxChars: 2500)
+        // Not the raw output: the notes, a few lines copied from it (Notes.swift). This turn's always; earlier ones if related.
+        ctx.add("What the steps found", notesText(state, turn: state.turns), priority: 0, maxChars: 2500)
+        ctx.add("Found earlier in this chat", notesText(state, before: state.turns, topic: topic), priority: 2, maxChars: 800)
         ctx.add("Commands that check the latest findings", (state.hints ?? []).joined(separator: "\n"), priority: 1, maxChars: 900)
         ctx.add("Unfinished request (the user's message may answer it; then propose the completed steps)", draft ?? "", priority: 0,
                 maxChars: 1200)
         ctx.add("Proposal the user is filling in (to change it, propose the same action with only the fields to change)",
                 editing.isEmpty ? "" : form, priority: 0, maxChars: 1500)
         ctx.add(question == nil ? "Task" : "User",
-                question ?? "Answer the user's last request from these results: quote or summarize the output lines that answer it, with the numbers that matter. If they don't answer it, say what is missing.",
+                question ?? "Answer the user's last request from what the steps found: quote the lines and numbers that answer it. If they don't answer it, say what is missing.",
                 priority: 0)
 
         let generic = prompts.active("skill.generic", default: "")
@@ -339,16 +360,19 @@ public final class ChatEngine: Sendable {
                 say(run, &state, ChatMessage("note", "bibi left out some of the proposed steps:\n" + why), emit)
             }
         }
+        // With "Let bibi look", steps that only read are about to run by themselves: no approval to ask for.
         if plan.actions.contains(where: { $0.problems != nil }) {
             reply = "Fill in what's missing below, or tell me, then approve."
         } else if finding != nil && (Self.claimsResults(reply, question: focus) || !Self.readsAsPlan(reply)) {
             // The model sometimes answers as if the steps had already run; nothing has run yet.
-            reply = "Here is what I'd do; approve it to run."
+            reply = autoApprovable(run, state) != nil ? "Let me check." : "Here is what I'd do; approve it to run."
         }
         if reply.isEmpty, finding == nil, let question, let out = await wayOut(run, &state, question, phrase: phrase, explore: explore, emit) {
             (reply, finding) = out
         }
-        if reply.isEmpty { reply = finding == nil ? "I don't have an answer for that." : "Here is what I'd run." }
+        if reply.isEmpty {
+            reply = finding == nil ? "I don't have an answer for that." : autoApprovable(run, state) != nil ? "Let me check." : "Here is what I'd run."
+        }
         say(run, &state, ChatMessage("bibi", reply, finding: finding), emit)
     }
 
@@ -466,18 +490,22 @@ public final class ChatEngine: Sendable {
             .joined(separator: "\n")
     }
 
-    /// One model call, shortening the prompt when it overflows the context. Says what went wrong and returns nil
-    /// when it can't answer.
+    /// One model call, shortening the prompt when it overflows the context. The instructions and the schema take
+    /// their share of the window first; the prompt gets the rest, up to `budget`. Says what went wrong and returns
+    /// nil when it can't answer.
     func ask(_ run: RunRecord, _ state: inout ChatState, _ ctx: ContextBuilder, instructions: String, schema: Schema,
              emit: @escaping ChatEmit) async -> JSONValue? {
         let model = model(run)
-        var budget = self.budget
+        let fixed = Int(Double(instructions.count + schema.estimatedChars) * 1.3)
+        var budget = max(Self.minPromptChars, min(self.budget, Self.contextChars - fixed))
         for _ in 0..<4 {
             do {
                 return try await model.stream(ctx.build(budget: budget).text, instructions: instructions, schema: schema) { partial in
                     if let r = partial["reply"]?.string, !r.isEmpty { emit("delta", r) }
                 }
             } catch let e as LLMError where e.contextOverflow {
+                // Counted, so `make eval` and the Graph page show how often the estimate was wrong.
+                graph.record("overflow", node: state.intent ?? GraphSync.root, conversation: run.id, payload: .number(Double(budget)))
                 budget = budget * 2 / 3
             } catch {
                 say(run, &state, ChatMessage("note", "The model failed: \(error)"), emit)
@@ -794,7 +822,7 @@ public final class ChatEngine: Sendable {
         let skillName = graph.node(owner)?.name ?? "generic"
 
         if !d.dryRun {
-            for _ in approved { record("approved", owner, state, run) }
+            for _ in approved { record(d.auto ? "auto" : "approved", owner, state, run) }
         }
         for a in skipped {
             record("skipped", owner, state, run)
@@ -806,12 +834,56 @@ public final class ChatEngine: Sendable {
         }
 
         let reporter = ChatReporter(emit: emit)
+        let performed = await perform(approved, run: run, state: &state, dryRun: d.dryRun, adminConfirmed: d.adminConfirmed,
+                                      admin: admin, reporter: reporter, emit: emit)
+        var results = performed.results
+        if let pending = state.pending, let f = run.report()?.findings.first(where: { $0.id == pending }) {
+            let decided = Set(d.approve + d.skip).union(done)
+            if f.recommendations.allSatisfy({ decided.contains($0.id) }) { state.pending = nil }
+        }
+        if let next = performed.next { state.pending = next }
+
+        // "Let bibi look": from what the steps found, the next read-only steps, until the notes answer the request.
+        // Not while a skill's own proposal waits for a decision.
+        var worked = approved, paused = false
+        if !d.dryRun, state.look == true, state.pending == nil, !results.isEmpty {
+            let more = await look(run, &state, admin: admin, reporter: reporter, emit: emit)
+            worked += more.actions; results += more.results; paused = more.paused
+        }
+
+        if !d.dryRun, let intent = state.intent {
+            // A step the request didn't ask for (an example's "reveal") ran, but it isn't how this request is answered.
+            let ok = worked.filter { a in results.contains { $0.actionID == a.id && $0.ok } }.map(PlannedStep.from)
+                .filter { s in state.asked.map { !Self.unasked(s.tool, $0) } ?? true }
+            if !ok.isEmpty {
+                await learn(intent, ok, owner: owner, run: run, state: &state, emit: emit)
+            }
+        }
+        prompts.evaluate("skill." + skillName)
+
+        // Paused: a card waits for the user; the answer comes once they decide. Skipping that card still gets an
+        // answer from what was found before it.
+        let found = state.look == true && !notesText(state, turn: state.turns).isEmpty
+        if !d.dryRun && (!results.isEmpty || found) && !paused {
+            await think(run, &state, question: nil, emit: emit)
+            state.results = []
+        }
+        await compact(run, &state)
+        save(run, state)
+        return results
+    }
+
+    /// Runs steps through the harness (validation, journal, admin confirmation), shows each result, and keeps notes
+    /// of what they found. Returns the results and, when a skill ran, the id of its own proposal.
+    func perform(_ approved: [BoundAction], run: RunRecord, state: inout ChatState, dryRun: Bool, adminConfirmed: Bool,
+                 admin: any AdminRunner, reporter: ChatReporter, emit: @escaping ChatEmit) async -> (results: [ExecResult], next: String?) {
+        let owner = state.skill ?? GraphSync.root
         let env = harness.env(admin: admin, reporter: reporter)
         var results = await harness.execute(approved.filter { $0.call.spec != "run_skill" }, run: run, env: env,
-                                            adminConfirmed: d.adminConfirmed, dryRun: d.dryRun, frontend: "chat")
+                                            adminConfirmed: adminConfirmed, dryRun: dryRun, frontend: "chat")
         var next: String?
         for a in approved where a.call.spec == "run_skill" {
-            let (r, fid, hints, candidate) = await runSkill(a, run, dryRun: d.dryRun, reporter: reporter)
+            let (r, fid, hints, candidate) = await runSkill(a, run, dryRun: dryRun, reporter: reporter)
             results.append(r)
             if let fid { next = fid }
             if !hints.isEmpty { state.hints = hints }
@@ -825,34 +897,23 @@ public final class ChatEngine: Sendable {
         for r in results {
             let output = r.output.map { "\n" + Text.clip($0, max: 4000) } ?? ""
             say(run, &state, ChatMessage("result", "\(r.title): \(r.message)\(output)", actionID: r.actionID, ok: r.ok), emit)
-            if !d.dryRun { graph.record(r.ok ? "executed" : "failed", node: owner, conversation: run.id) }
+            if !dryRun { graph.record(r.ok ? "executed" : "failed", node: owner, conversation: run.id) }
         }
-        state.results = results.map { r in
+        // The raw output stays at hand (clipped) to ground names and addresses the model uses; the model itself
+        // sees the notes.
+        state.results += results.map { r in
             "\(r.ok ? "OK" : "FAILED") \(r.title): \(r.message)" + (r.output.map { "\n" + Text.clip(Text.collapseRepeats($0), max: 1500) } ?? "")
         }
-        if let pending = state.pending, let f = run.report()?.findings.first(where: { $0.id == pending }) {
-            let decided = Set(d.approve + d.skip).union(done)
-            if f.recommendations.allSatisfy({ decided.contains($0.id) }) { state.pending = nil }
-        }
-        if let next { state.pending = next }
-
-        if !d.dryRun, let intent = state.intent {
-            // A step the request didn't ask for (an example's "reveal") ran, but it isn't how this request is answered.
-            let worked = approved.filter { a in results.contains { $0.actionID == a.id && $0.ok } }.map(PlannedStep.from)
-                .filter { s in state.asked.map { !Self.unasked(s.tool, $0) } ?? true }
-            if !worked.isEmpty {
-                await learn(intent, worked, owner: owner, run: run, state: &state, emit: emit)
+        if !dryRun {
+            let request = state.intent.flatMap { graph.node($0)?.props["question"]?.string } ?? ""
+            var notes = state.notes ?? []
+            for r in results {
+                notes += await self.notes(for: r, purpose: approved.first { $0.id == r.actionID }?.title ?? r.title,
+                                          request: request, turn: state.turns, run: run)
             }
+            state.notes = notes
         }
-        prompts.evaluate("skill." + skillName)
-
-        if !d.dryRun && !results.isEmpty {
-            await think(run, &state, question: nil, emit: emit)
-            state.results = []
-        }
-        await compact(run, &state)
-        save(run, state)
-        return results
+        return (results, next)
     }
 
     /// Changes fields of a proposed action from the form on its card, checks them again and saves the proposal.
@@ -974,6 +1035,9 @@ public final class ChatEngine: Sendable {
 
     /// Folds messages older than the last few into the summary and stores durable facts in the graph.
     func compact(_ run: RunRecord, _ state: inout ChatState) async {
+        // Notes are the current task's working memory; older ones are in the summary through their result messages.
+        let kept = (state.notes ?? []).filter { $0.turn >= state.turns - 1 }
+        state.notes = kept.isEmpty ? nil : kept
         guard state.recent.count > Self.keepMessages else { return }
         let msgs = Array(state.recent.dropLast(Self.keepMessages))
         state.recent = Array(state.recent.suffix(Self.keepMessages))

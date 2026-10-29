@@ -5,6 +5,8 @@
 const chatUI = { id: "", view: null, lastSeq: 0, draft: "", running: new Set(), quick: [], query: "" };
 // "Work it out": when no tool fits, bibi works out commands to propose instead of only answering. Kept per browser.
 try { chatUI.explore = localStorage.getItem("bibi-explore") === "1"; } catch { chatUI.explore = false; }
+// "Let bibi look": read-only steps run without a card and bibi keeps looking until it can answer. Kept per browser.
+try { chatUI.look = localStorage.getItem("bibi-look") === "1"; } catch { chatUI.look = false; }
 
 async function showChat(id) {
   chatUI.id = id;
@@ -60,10 +62,17 @@ function renderChat(chats) {
     chatUI.explore = explore.checked;
     try { localStorage.setItem("bibi-explore", explore.checked ? "1" : "0"); } catch {}
   });
+  const look = h("input", { type: "checkbox", id: "composer-look", checked: chatUI.look });
+  look.addEventListener("change", () => {
+    chatUI.look = look.checked;
+    try { localStorage.setItem("bibi-look", look.checked ? "1" : "0"); } catch {}
+  });
   const composer = h("div", { class: "composer" }, input,
     h("button", { class: "primary", id: "composer-send", onclick: () => sendChat(input.value) }, "Send"),
     h("label", { class: "check small muted explore", title: "When no tool fits, bibi plans the steps in plain words and turns each one into a command for you to approve, instead of only answering" },
-      explore, "Work it out when no tool fits (experimental)"));
+      explore, "Work it out when no tool fits (experimental)"),
+    h("label", { class: "check small muted explore", title: "Read-only commands run right away, without a card, and bibi keeps looking (up to three rounds) until it can answer. Anything that changes the Mac still needs your approval" },
+      look, "Let bibi look (runs read-only commands without asking)"));
 
   const head = v ? h("div", { class: "spread" }, h("h1", {}, v.state.title),
     h("span", { class: "row small" },
@@ -258,7 +267,7 @@ async function sendChat(text) {
   text = (text || "").trim();
   if (!text) return;
   try {
-    const r = await api("chat", { conversation: chatUI.id || undefined, message: text, explore: chatUI.explore });
+    const r = await api("chat", { conversation: chatUI.id || undefined, message: text, explore: chatUI.explore, look: chatUI.look });
     chatUI.draft = "";
     if (r.id !== chatUI.id) {
       // A new conversation: show it, then follow its events from the start.
