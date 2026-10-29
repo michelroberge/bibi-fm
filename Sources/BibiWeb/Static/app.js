@@ -64,7 +64,7 @@ const runPath = (id, rest) => `runs/${encodeURIComponent(id)}/${rest}`;
 
 // Fills `out` with what `render` returns, or with the error it throws.
 async function fill(out, render) {
-  try { out.replaceChildren(...[await render()].flat()); } catch (e) { out.replaceChildren(failBox(e.message)); }
+  try { out.replaceChildren(...[await render()].flat(Infinity).filter((c) => c != null && c !== false)); } catch (e) { out.replaceChildren(failBox(e.message)); }
 }
 
 let catalog = { diagnostics: [], actions: [] };
@@ -89,23 +89,26 @@ document.getElementById("version").addEventListener("click", () => document.getE
 
 // --- router --------------------------------------------------------------------------------------
 // #/<view>/<id> -> [highlighted nav item, page]. Chat is the home page; the skill launcher lives at #/run.
+// Settings ids have several parts (#/settings/prompts/chat.system), each encoded.
 const routes = new Map([
   ["chat", ["chat", (id) => showChat(id)]],
-  ["skills", ["skills", () => showSkills()]],
-  ["graph", ["graph", (id) => showGraph(id)]],
   ["run", ["home", (id) => id ? showRun(id) : showHome()]],
   ["history", ["history", () => showHistory()]],
-  ["diff", ["diff", (id) => showDiff(id)]],
+  ["settings", ["settings", (id) => showSettings(id)]],
 ]);
+// The pages Settings replaced.
+const moved = { skills: (id) => "#/settings/skills" + (id ? "/" + id : ""), graph: (id) => id === "advanced" ? "#/settings/data" : "#/settings/skills" + (id ? "/" + id : ""), diff: () => "#/history" };
 
 async function route() {
   if (currentStream) { currentStream.close(); currentStream = null; }
   bar().hidden = true;
-  const [, view, id] = (location.hash.slice(1) || "/").split("/");
+  const [, view, ...rest] = (location.hash.slice(1) || "/").split("/");
+  const id = rest.map(decodeURIComponent).join("/");
+  if (moved[view]) { location.replace(moved[view](rest.join("/"))); return; }
   const [section, page] = routes.get(view) || routes.get("chat");
   for (const a of document.querySelectorAll("nav a")) a.classList.toggle("active", a.dataset.nav === section);
   try {
-    await page(id ? decodeURIComponent(id) : "");
+    await page(id);
   } catch (e) {
     app().replaceChildren(errorBox(e));
   }
@@ -256,7 +259,7 @@ function renderReport(view, body, id, subscribe) {
   };
   body.replaceChildren(
     summaryPanel(r),
-    ...diffSection(r.diff, view.meta.skill),
+    ...diffSection(r.diff),
     ...hypothesesSection(r.hypotheses, ctx.obsById),
     ...findingsSection(r.findings, ctx),
     ...journalSection(ctx),
@@ -271,12 +274,13 @@ function summaryPanel(r) {
 
 const DIFF_PREVIEW = 30;
 
-function diffSection(diff, skill) {
+function diffSection(diff) {
   if (!diff) return [];
   const ch = diff.changes;
+  const list = h("div", {}, changeList(ch.slice(0, DIFF_PREVIEW)));
+  const more = h("button", { class: "small", onclick: () => { list.replaceChildren(changeList(ch)); more.remove(); } }, `Show all ${ch.length} changes`);
   return [h("h2", {}, `Changes since ${when(diff.baselineDate)}`),
-    h("div", { class: "panel" }, ch.length ? changeList(ch.slice(0, DIFF_PREVIEW)) : h("span", { class: "muted" }, "Nothing changed."),
-      ch.length > DIFF_PREVIEW ? h("a", { href: "#/diff/" + encodeURIComponent(skill) }, `… all ${ch.length} changes`) : null)];
+    h("div", { class: "panel" }, ch.length ? list : h("span", { class: "muted" }, "Nothing changed."), ch.length > DIFF_PREVIEW ? more : null)];
 }
 
 function hypothesesSection(hypotheses, obsById) {
@@ -553,35 +557,6 @@ function historyRow(r) {
     h("td", { class: "small mono muted" }, meta.args.join(" ")));
 }
 
-// --- changes (baseline diff) ---------------------------------------------------------------------
-async function showDiff(skill) {
-  const select = h("select", {}, h("option", { value: "" }, "Choose a command"), skills.map((s) => h("option", { value: s.name, selected: s.name === skill }, s.name)));
-  const since = h("select", {}, ["", "1d", "7d", "30d"].map((v) => h("option", { value: v }, v ? `at least ${v.replace("d", " day(s)")} ago` : "about a week ago (default)")));
-  const out = h("div", {});
-  const load = async () => {
-    if (!select.value) { out.replaceChildren(); return; }
-    out.replaceChildren(h("span", { class: "spinner" }));
-    try {
-      out.replaceChildren(diffResult(await api(`diff?skill=${encodeURIComponent(select.value)}&since=${encodeURIComponent(since.value)}`)));
-    } catch (e) { out.replaceChildren(errorBox(e)); }
-  };
-  select.addEventListener("change", load);
-  since.addEventListener("change", load);
-  app().replaceChildren(h("h1", {}, "Changes"),
-    h("p", { class: "muted" }, "Compare the latest run of a command with an earlier one: new listeners, login items, apps, resource use…"),
-    h("div", { class: "row" }, select, since), out);
-  load();
-}
-
-function diffResult(d) {
-  if (!d.latest) return h("div", { class: "empty" }, "No runs of this command yet.");
-  if (!d.baseline) return h("div", { class: "empty" }, "Only one comparable run so far. Run it again later to see what changed.");
-  return h("div", { class: "panel" },
-    h("div", { class: "muted small" }, h("a", { href: "#/run/" + d.latest.id }, `Latest run (${when(d.latest.started)})`), " compared with ",
-      h("a", { href: "#/run/" + d.baseline.id }, when(d.baseline.started))),
-    d.changes.length ? changeList(d.changes) : h("p", {}, "Nothing changed."));
-}
-
 // --- theme: auto (device setting), light or dark; the choice is kept per browser --------------------
 (() => {
   const buttons = document.querySelectorAll("[data-theme-choice]");
@@ -743,6 +718,7 @@ function diffResult(d) {
     [skills, catalog] = await Promise.all([api("skills"), api("catalog")]);
     document.getElementById("version").textContent = "v" + catalog.version;
     document.getElementById("about-version").textContent = "Version " + catalog.version + ".";
+    refreshSettingsBadge();
   } catch (e) {
     app().replaceChildren(errorBox(e));
     return;

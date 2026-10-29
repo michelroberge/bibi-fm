@@ -104,10 +104,12 @@ public struct ActionEnv: Sendable {
     public var admin: any AdminRunner
     public var reporter: any Reporter
     public var apps: AppServices
+    /// Timeouts and other tunables (Settings); built-in values without a graph.
+    public var knobs: Knobs
 
     public init(policy: SafetyPolicy = SafetyPolicy(), admin: any AdminRunner, reporter: any Reporter = SilentReporter(),
-                apps: AppServices = .system) {
-        self.policy = policy; self.admin = admin; self.reporter = reporter; self.apps = apps
+                apps: AppServices = .system, knobs: Knobs = Knobs(nil)) {
+        self.policy = policy; self.admin = admin; self.reporter = reporter; self.apps = apps; self.knobs = knobs
     }
 }
 

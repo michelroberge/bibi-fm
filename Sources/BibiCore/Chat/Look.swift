@@ -10,22 +10,20 @@ extension ChatEngine {
     reply: one short sentence on what the steps will find out; empty when done.
     """
 
+    static let nextTask = "Do the notes answer the request? If not, the next read-only steps."
+
     static func nextSchema(_ tools: [String]) -> Schema {
         Schema("Next", [
             .init("done", .bool, "true when the notes answer the request, or nothing read-only would add to them"),
             .init("steps", .array(.object(Schema("Step", [
-                .init("tool", .choice(tools)),
+                // Every tool can be turned off in Settings; a choice needs at least one value.
+                .init("tool", .choice(tools.isEmpty ? ["none"] : tools)),
                 .init("args", .array(.string, max: 16), "command: the program, then each argument; action: key=value"),
                 .init("purpose", .string, "a few words: what this step finds out"),
             ])), max: 2), "empty when done"),
             .init("reply", .string, "one sentence on what the steps will find out; empty when done"),
         ])
     }
-
-    /// Rounds of looking per user message, each of at most two steps.
-    static let maxLookSteps = 3
-    /// Times one program may run in a task: a small model re-runs `ps` with new flags instead of moving on.
-    static let maxRunsPerProgram = 2
 
     /// A step that may run without a card: a read-only command or registry action, as the user, with nothing left
     /// to fill in. Skills (slow, with proposals of their own) and app calls always get a card.
@@ -59,23 +57,26 @@ extension ChatEngine {
             .compactMap { id in run.report()?.action(id).map { PlannedStep.from($0).signature } }
         var actions: [BoundAction] = [], results: [ExecResult] = [], failures = 0
         let instructions = prompts.text("chat.next", default: Self.nextInstructions)
-        for i in 0..<Self.maxLookSteps {
+        // Rounds of looking per user message (each of at most two steps), and times one program may run in a task:
+        // a small model re-runs `ps` with new flags instead of moving on.
+        let rounds = knobs.int(.lookRounds), repeats = knobs.int(.lookRepeats)
+        for i in 0..<rounds {
             let tools = toolCatalog([], request: request, examples: [])
             var ctx = ContextBuilder()
             ctx.add("Now", DateText.formatter("EEEE yyyy-MM-dd HH:mm").string(from: Date()), priority: 0)
             ctx.add("Request", request, priority: 0)
-            ctx.add("Tools", tools.text, priority: 0, maxChars: 1500)
-            ctx.add("What the steps found", notesText(state, turn: state.turns), priority: 0, maxChars: 2500)
+            ctx.add("Tools", tools.text, priority: 0, maxChars: knobs.int(.lookTools))
+            ctx.add("What the steps found", notesText(state, turn: state.turns), priority: 0, maxChars: knobs.int(.lookNotes))
             ctx.add("Commands that check the latest findings", (state.hints ?? []).joined(separator: "\n"), priority: 1, maxChars: 900)
-            ctx.add("Task", "Do the notes answer the request? If not, the next read-only steps.", priority: 0)
-            emit("delta", "Looking (round \(i + 1) of \(Self.maxLookSteps))…")
+            ctx.add("Task", prompts.text("chat.next.task", default: Self.nextTask), priority: 0)
+            emit("delta", "Looking (round \(i + 1) of \(rounds))…")
             guard let a = await ask(run, &state, ctx, instructions: instructions, schema: Self.nextSchema(tools.ids), emit: emit),
                   a["done"]?.bool != true else { break }
             let steps = Array(Self.steps(a).prefix(2))
             guard !steps.isEmpty else { break }
             let plan = await bind(steps, run: run, said: request + "\n" + state.results.joined(separator: "\n"), request: request)
             let fresh = plan.actions.filter { a in
-                !ran.contains(a.call) && programs.filter { $0 == PlannedStep.from(a).signature }.count < Self.maxRunsPerProgram
+                !ran.contains(a.call) && programs.filter { $0 == PlannedStep.from(a).signature }.count < repeats
             }
             guard !fresh.isEmpty else { break }
             let reply = (a["reply"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)

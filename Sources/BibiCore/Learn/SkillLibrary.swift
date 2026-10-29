@@ -1,6 +1,6 @@
 import Foundation
 
-/// The skill tree as the user sees it (web Skills page, `bibi skills`), and the user's decisions on learned skills.
+/// The skill tree as the user sees it (web Settings → Skills, `bibi skills`), and the user's decisions on learned skills.
 public enum SkillLibrary {
     public struct SkillView: Codable, Sendable {
         public var id: String

@@ -233,22 +233,9 @@ struct API: Sendable {
             let page = runs.dropFirst(offset).prefix(limit).map { HistoryItem(meta: $0.meta, undoable: $0.undoable.count) }
             return json(HistoryPage(items: Array(page), total: runs.count, offset: offset, limit: limit))
         }
-        api.get("diff") { req, _ in
-            guard let name = req.uri.queryParameters["skill"].map(String.init), let skill = harness.skill(named: name) else {
-                throw HTTPError(.badRequest, message: "skill is required")
-            }
-            let since = req.uri.queryParameters["since"].map(String.init).flatMap { $0.isEmpty ? nil : $0 }
-            let runs = harness.store.list(skill: skill.name).filter { $0.meta.finished != nil && $0.meta.error == nil }
-            guard let latest = runs.first, let new = latest.report() else { return json(["latest": JSONValue.null]) }
-            guard let base = harness.store.baseline(skill: skill.name, since: since, excluding: latest.id), let old = base.report(),
-                  skill.comparable(old.facts, new.facts) else {
-                return json(DiffView(latest: latest.meta, baseline: nil, changes: []))
-            }
-            return json(DiffView(latest: latest.meta, baseline: base.meta,
-                                 changes: Baseline.diff(old: old.facts, new: new.facts, spec: skill.factsSpec)))
-        }
         registerChat(api)
         registerGraph(api)
+        registerSettings(api)
     }
 
     func engine() throws -> ChatEngine {
@@ -389,14 +376,15 @@ struct API: Sendable {
             let name = try ctx.parameters.require("name")
             let b = try await decode(req, GuidanceBody.self)
             guard let n = chat.graph.node(GraphSync.skillID(name)), n.kind == "skill" else { throw HTTPError(.notFound, message: "no skill \(name)") }
-            PromptBook(chat.graph).revise("skill." + name, text: String(b.text.prefix(2000)), reason: "edited in the web UI")
+            let builtIn = harness.skill(named: name)?.help ?? ""
+            PromptBook(chat.graph).override("skill." + name, text: String(b.text.prefix(2000)), builtIn: builtIn)
             return json(SkillLibrary.view(n, graph: chat.graph))
         }
     }
 
     func tuning() throws -> GraphTuning { GraphTuning(graph: try engine().graph, harness: harness) }
 
-    /// The Graph page: fine-tuning what chat retrieves for each skill, and an advanced editor for any node or edge.
+    /// Settings → Skills and Data: fine-tuning what chat retrieves for each skill, and a raw editor for any node or edge.
     /// Node ids contain ":", so they travel in the query or the body.
     func registerGraph(_ api: RouterGroup<BasicRequestContext>) {
         api.get("graph/tune/:name") { _, ctx in json(try checked { try tuning().view(ctx.parameters.require("name")) }) }
@@ -451,12 +439,6 @@ struct API: Sendable {
     @discardableResult
     func checked<T>(_ body: () throws -> T) throws -> T {
         do { return try body() } catch let e as ActionError { throw HTTPError(.badRequest, message: e.description) }
-    }
-
-    struct DiffView: Encodable {
-        var latest: RunMeta
-        var baseline: RunMeta?
-        var changes: [FactChange]
     }
 
     func info(_ s: any Skill) -> SkillInfo {

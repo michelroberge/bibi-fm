@@ -51,9 +51,11 @@ struct Common {
 }
 
 struct CLI {
-    let harness = Harness(skills: AllSkills.list, graph: try? GraphStore()) {
+    static let graph = try? GraphStore()
+    let harness = Harness(skills: AllSkills.list, graph: CLI.graph) {
         if let reason = FoundationModel.unavailableReason() { return UnavailableModel(reason) }
-        return FoundationModel()
+        let knobs = Knobs(CLI.graph)
+        return FoundationModel(timeout: knobs[.modelTimeout], retries: knobs.int(.modelRetries))
     }
 
     func main(_ argv: [String]) async -> Int32 {

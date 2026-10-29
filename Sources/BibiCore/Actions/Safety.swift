@@ -15,6 +15,10 @@ public struct SafetyPolicy: Sendable {
     public var protectedPrefixes: [String]
     /// Overrides the regenerable rule (tests only).
     public var regenerableOverride: (@Sendable (String) -> Bool)?
+    /// Programs the user added in Settings: allowed ones count as read-only (bibi's structural rules still apply),
+    /// blocked ones are refused.
+    public var allowCommands: Set<String> = []
+    public var blockCommands: Set<String> = []
 
     public init(home: String = Paths.home) {
         self.home = home

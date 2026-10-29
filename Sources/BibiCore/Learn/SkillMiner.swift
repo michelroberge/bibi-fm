@@ -4,14 +4,13 @@ import Foundation
 ///
 /// Every request that ran successfully is an `intent` node with the steps that ran and their signature
 /// (tools and programs). Intents with the same signature and a similar phrasing form a cluster; once a cluster has
-/// `minOccurrences` members and no skill covers it, the steps are generalized (arguments that differ become
+/// `learn.minOccurrences` members and no skill covers it, the steps are generalized (arguments that differ become
 /// `{param}` slots) into a `candidate` skill.
 public struct SkillMiner: Sendable {
     let graph: GraphStore
     let model: any LanguageModel
     let prompts: PromptBook
-    public static let minOccurrences = 3
-    public static let similarity = 0.65
+    var knobs: Knobs { Knobs(graph) }
 
     public init(graph: GraphStore, model: any LanguageModel, prompts: PromptBook) {
         self.graph = graph; self.model = model; self.prompts = prompts
@@ -23,7 +22,9 @@ public struct SkillMiner: Sendable {
     help: one sentence saying what the skill does, starting with a verb.
     """
 
-    /// A node's steps: the user's override (Graph page), or the steps it was saved with.
+    static let draftSchema = Schema("SkillDraft", [.init("name", .string, "two to four words"), .init("help", .string, "one sentence")])
+
+    /// A node's steps: the user's override (Settings), or the steps it was saved with.
     public static func steps(_ n: GraphNode) -> [PlannedStep] {
         (GraphSync.tuned(n, "steps") ?? n.props["steps"]).flatMap { try? JSON.decode([PlannedStep].self, from: JSON.string($0)) } ?? []
     }
@@ -31,11 +32,11 @@ public struct SkillMiner: Sendable {
     /// The intents that ran successfully with the same signature as `intent` and similar wording.
     public func cluster(for intent: GraphNode) -> [GraphNode] {
         guard let sig = intent.props["signature"]?.string else { return [] }
-        let v = graph.vector(intent.id)
+        let v = graph.vector(intent.id), similarity = knobs[.mineSimilarity]
         return graph.nodes(kind: "intent").filter { n in
             n.props["outcome"]?.string == "ok" && n.status != "disabled" && n.props["seed"] == nil
                 && n.props["source"]?.string != "manual" && n.props["signature"]?.string == sig
-                && (n.id == intent.id || Similarity.score(intent.name, v, n.name, graph.vector(n.id)) >= Self.similarity)
+                && (n.id == intent.id || Similarity.score(intent.name, v, n.name, graph.vector(n.id)) >= similarity)
         }
     }
 
@@ -43,7 +44,7 @@ public struct SkillMiner: Sendable {
     public func observe(_ intentID: String) async -> GraphNode? {
         guard let intent = graph.node(intentID), let sig = intent.props["signature"]?.string else { return nil }
         let members = cluster(for: intent)
-        guard members.count >= Self.minOccurrences else { return nil }
+        guard members.count >= knobs.int(.minOccurrences) else { return nil }
 
         // Already covered: a skill with this signature that is active, proposed, or dismissed at this size.
         for s in graph.nodes(kind: "skill") where s.props["signature"]?.string == sig {
@@ -64,8 +65,7 @@ public struct SkillMiner: Sendable {
         let prompt = "Requests:\n" + members.prefix(5).map { "- " + ($0.props["question"]?.string ?? $0.name) }.joined(separator: "\n")
             + "\nSteps:\n" + steps.map { "- \($0.tool) \(Shell.join($0.args))" }.joined(separator: "\n")
         if let r = try? await model.respond(prompt, instructions: prompts.text("learn.draft", default: Self.draftInstructions),
-                                            schema: Schema("SkillDraft", [.init("name", .string, "two to four words"),
-                                                                          .init("help", .string, "one sentence")])) {
+                                            schema: Self.draftSchema) {
             name = r["name"]?.string?.ifEmpty(name) ?? name
             help = r["help"]?.string?.ifEmpty(help) ?? help
         }

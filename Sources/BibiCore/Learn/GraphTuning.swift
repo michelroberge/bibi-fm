@@ -1,6 +1,6 @@
 import Foundation
 
-/// Fine-tuning the graph behind the skills (the web Graph page): what chat matches a skill on, the example
+/// Fine-tuning the graph behind the skills (web Settings → Skills): what chat matches a skill on, the example
 /// requests it learns from, and the steps of learned skills. Built-in values stay the defaults; the user's edits
 /// are overrides in `props.tuned` that sync leaves alone and that can be reset.
 public struct GraphTuning: Sendable {
@@ -266,8 +266,8 @@ extension GraphTuning {
     /// Nodes bibi rewrites from its code or history: editing them here would be undone or bypass versioning.
     func locked(_ n: GraphNode) -> String? {
         if n.id == GraphSync.root { return "the generic skill is fixed" }
-        if n.props["source"]?.string == "builtin" { return "a built-in skill: tune its keywords and description on its Graph page" }
-        if n.props["seed"] != nil { return "a starter example: edit it on its skill's Graph page" }
+        if n.props["source"]?.string == "builtin" { return "a built-in skill: tune its keywords and description under Settings → Skills" }
+        if n.props["seed"] != nil { return "a starter example: edit it under Settings → Examples" }
         switch n.kind {
         case "action", "namespace": return "bibi rebuilds \(n.kind)s from its code"
         case "prompt_version": return "a past version: edit the prompt itself to add a version"
@@ -300,7 +300,11 @@ extension GraphTuning {
             guard Self.statuses.contains(status) else { throw ActionError("unknown status \(status)") }
         }
         if n.kind == "prompt", let text {
-            PromptBook(graph).revise(n.name, text: String(text.prefix(4000)), reason: "edited in the Graph page")
+            if let builtIn = harness.promptCatalog.first(where: { $0.id == n.name })?.builtIn {
+                PromptBook(graph).override(n.name, text: String(text.prefix(4000)), builtIn: builtIn)
+            } else {
+                PromptBook(graph).revise(n.name, text: String(text.prefix(4000)), reason: "edited in Settings")
+            }
         }
         graph.update(id) { n in
             if let name { n.name = Text.oneLine(name, max: 200) }

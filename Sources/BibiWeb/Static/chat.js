@@ -1,5 +1,5 @@
 "use strict";
-// Chat with bibi, and the Skills page. Loaded before app.js; uses its helpers (h, api, token, recommendation,
+// Chat with bibi. Loaded before app.js; uses its helpers (h, api, token, recommendation,
 // confirmDialog, decisionsFor, currentStream) at call time.
 
 const chatUI = { id: "", view: null, lastSeq: 0, draft: "", running: new Set(), quick: [], query: "" };
@@ -57,12 +57,12 @@ function renderChat(chats) {
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(input.value); }
   });
-  const explore = h("input", { type: "checkbox", id: "composer-explore", checked: chatUI.explore });
+  const explore = h("input", { type: "checkbox", role: "switch", class: "toggle", id: "composer-explore", checked: chatUI.explore });
   explore.addEventListener("change", () => {
     chatUI.explore = explore.checked;
     try { localStorage.setItem("bibi-explore", explore.checked ? "1" : "0"); } catch {}
   });
-  const look = h("input", { type: "checkbox", id: "composer-look", checked: chatUI.look });
+  const look = h("input", { type: "checkbox", role: "switch", class: "toggle", id: "composer-look", checked: chatUI.look });
   look.addEventListener("change", () => {
     chatUI.look = look.checked;
     try { localStorage.setItem("bibi-look", look.checked ? "1" : "0"); } catch {}
@@ -106,12 +106,20 @@ async function quickRun(skill) {
   }
 }
 
+// Cuts long text at a word boundary and marks the cut, so a pasted log can't swamp the sidebar.
+const clip = (s, n) => {
+  s = (s ?? "").replace(/\s+/g, " ").trim();
+  if (s.length <= n) return s;
+  const cut = s.slice(0, n), space = cut.lastIndexOf(" ");
+  return (space > n * 0.6 ? cut.slice(0, space) : cut).replace(/[\s.,;:]+$/, "") + "...";
+};
+
 function fillChatList(el, chats) {
   if (!chats.length) { el.replaceChildren(h("div", { class: "muted small", style: "padding:6px 8px" }, chatUI.query ? "No chat matches." : "No chats yet.")); return; }
   el.replaceChildren(...chats.map((c) => h("div", { class: "chatitem" + (c.id === chatUI.id ? " active" : "") },
     h("a", { href: "#/chat/" + encodeURIComponent(c.id) },
-      h("div", { class: "title" }, c.title),
-      c.snippet ? h("div", { class: "muted small snippet" }, c.snippet) : h("div", { class: "muted small" }, when(c.started))),
+      h("div", { class: "title", title: c.title }, clip(c.title, 80)),
+      c.snippet ? h("div", { class: "muted small snippet" }, clip(c.snippet, 140)) : h("div", { class: "muted small" }, when(c.started))),
     h("button", { class: "small icon", title: "Delete this chat", "aria-label": "Delete " + c.title, onclick: () => deleteChat(c) }, "×"))));
 }
 
@@ -237,6 +245,7 @@ function candidateCard(c) {
   const act = (verb) => async () => {
     try {
       await api(`graph/skills/${encodeURIComponent(c.name)}/${verb}`, {});
+      refreshSettingsBadge();
       chatUI.view = await api("chat/" + encodeURIComponent(chatUI.id));
       rerenderChat();
     } catch (e) { out.replaceChildren(h("div", { class: "result fail" }, e.message)); }
@@ -379,61 +388,4 @@ async function decideChat(approve, skip, reason, dryRun) {
   } catch (e) {
     document.getElementById("chatlog")?.append(h("div", { class: "msg note" }, e.message));
   }
-}
-
-// --- skills ----------------------------------------------------------------------------------------
-async function showSkills() {
-  const all = await api("graph/skills");
-  const candidates = all.filter((s) => s.status === "candidate");
-  const byNs = {};
-  for (const s of all.filter((s) => s.status !== "candidate" && s.namespace !== "")) (byNs[s.namespace] ||= []).push(s);
-  const generic = all.find((s) => s.namespace === "");
-  app().replaceChildren(h("div", {},
-    h("h1", {}, "Skills"),
-    h("p", { class: "muted" }, "What bibi can do, how often its proposals were approved, and skills it learned from your chats. Guidance is part of each skill's prompt; bibi adds an \"Avoid:\" line when you skip a proposal and say why, and rolls a change back if approvals drop."),
-    candidates.length ? h("h2", {}, "Proposed skills") : null,
-    candidates.map((c) => skillCard(c)),
-    generic ? h("h2", {}, "Generic (chat)") : null, generic ? skillCard(generic) : null,
-    Object.keys(byNs).sort().map((ns) => [h("div", { class: "ns" }, ns), byNs[ns].map((s) => skillCard(s))])));
-}
-
-function skillCard(s) {
-  const out = h("div", {});
-  const act = (verb) => async () => {
-    try { await api(`graph/skills/${encodeURIComponent(s.name)}/${verb}`, {}); await showSkills(); }
-    catch (e) { out.replaceChildren(h("div", { class: "result fail" }, e.message)); }
-  };
-  const st = s.stats || {};
-  const decided = (st.approved || 0) + (st.skipped || 0);
-  const guidance = h("textarea", { rows: 3 });
-  guidance.value = s.guidance ?? s.help;
-  const editor = h("details", {}, h("summary", {}, `Guidance${s.guidanceVersions ? ` (version ${s.guidanceVersions})` : ""}`), guidance,
-    h("button", { class: "small", onclick: async () => {
-      try { await api(`graph/skills/${encodeURIComponent(s.name)}/guidance`, { text: guidance.value }); await showSkills(); }
-      catch (e) { out.replaceChildren(h("div", { class: "result fail" }, e.message)); }
-    } }, "Save guidance"));
-  const buttons = {
-    candidate: [["accept", "Keep this skill", "primary"], ["dismiss", "Dismiss", ""]],
-    active: s.source === "learned" ? [["disable", "Disable", ""]] : s.namespace ? [["disable", "Hide from chat", ""]] : [],
-    disabled: [["enable", "Enable", ""]],
-    dismissed: [["accept", "Keep it after all", ""]],
-  }[s.status] || [];
-  return h("div", { class: "panel" },
-    h("div", { class: "spread" },
-      h("div", { class: "row" }, h("h3", {}, s.name), s.source === "learned" ? h("span", { class: "pill accent" }, "learned") : null,
-        s.status !== "active" ? h("span", { class: "pill " + (s.status === "candidate" ? "warn" : "") }, s.status) : null),
-      h("div", { class: "row small" },
-        h("span", { class: "pill" }, `proposed ${st.proposed || 0}`),
-        h("span", { class: "pill ok" }, `approved ${st.approved || 0}`),
-        h("span", { class: "pill" }, `skipped ${st.skipped || 0}`),
-        st.failed ? h("span", { class: "pill bad" }, `failed ${st.failed}`) : null,
-        decided ? meter(Math.round(s.approvalRate * 100)) : null)),
-    h("p", { class: "muted small" }, s.help),
-    skillSteps(s),
-    s.params?.length ? h("div", { class: "small" }, "Run it: ", h("code", {}, `bibi ${s.name} ${s.params.map((p) => `--${p} …`).join(" ")}`)) : null,
-    s.examples?.length ? h("details", {}, h("summary", {}, `Learned from ${s.examples.length} request(s)`), h("ul", { class: "small" }, s.examples.map((e) => h("li", {}, e)))) : null,
-    editor,
-    h("a", { class: "small", href: `#/graph/${encodeURIComponent(s.name)}` }, "Tune in Graph →"),
-    buttons.length ? h("div", { class: "row" }, buttons.map(([verb, label, cls]) => h("button", { class: "small " + cls, onclick: act(verb) }, label))) : null,
-    out);
 }

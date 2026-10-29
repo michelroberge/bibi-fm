@@ -53,7 +53,7 @@ public enum GraphSync {
         graph.upsert(n)
     }
 
-    /// A field as the user tuned it (Graph page), or the node's own value.
+    /// A field as the user tuned it (Settings), or the node's own value.
     public static func tuned(_ n: GraphNode, _ key: String) -> JSONValue? { n.props["tuned"]?[key] }
 
     /// The words chat matches a skill on: the user's override, or the code's keywords.

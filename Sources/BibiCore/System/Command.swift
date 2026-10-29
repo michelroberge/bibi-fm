@@ -179,4 +179,26 @@ public enum Shell {
     }
 
     public static func join(_ argv: [String]) -> String { argv.map(quoteIfNeeded).joined(separator: " ") }
+
+    /// Splits a typed command line into argv the way a shell would for plain words and quotes (no expansion).
+    /// Operators like | stay separate words, so the command policy can see and refuse them.
+    public static func split(_ line: String) -> [String] {
+        var out: [String] = [], cur = "", quote: Character?, started = false
+        var it = line.makeIterator()
+        while let c = it.next() {
+            if let q = quote {
+                if c == q { quote = nil } else if c == "\\" && q == "\"", let n = it.next() { cur.append(n) } else { cur.append(c) }
+            } else if c == "'" || c == "\"" {
+                quote = c; started = true
+            } else if c == "\\" {
+                if let n = it.next() { cur.append(n); started = true }
+            } else if c.isWhitespace {
+                if started || !cur.isEmpty { out.append(cur); cur = ""; started = false }
+            } else {
+                cur.append(c)
+            }
+        }
+        if started || !cur.isEmpty { out.append(cur) }
+        return out
+    }
 }

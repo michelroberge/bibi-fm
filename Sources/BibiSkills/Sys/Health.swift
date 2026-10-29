@@ -22,6 +22,11 @@ public struct SysHealth: Skill {
     }
     public var actionSpecs: [any ActionSpec] { [QuitProcess()] + LaunchItemSpecs.all }
 
+    public var prompts: [PromptDefinition] {
+        [PromptDefinition("sys.health.context", "Health check context", group: PromptCatalog.analysis,
+                          purpose: "Put before each finding sys.health asks the model to explain or link into causes.", builtIn: Self.context)]
+    }
+
     static let context = "Context: a macOS system health check. Explain symptoms and likely causes; prefer checking over acting."
 
     public func run(_ args: Args, _ ctx: SkillContext) async throws -> SkillResult {
@@ -252,8 +257,8 @@ public struct SysHealth: Skill {
         }
 
         ui.progress("Asking fm to explain and connect the findings...")
-        let explained = await ctx.explainer.explainAll(ev.sortedFindings(), observations: ev.allObservations, context: Self.context, limit: 10)
-        let hypotheses = await ctx.explainer.correlate(explained, observations: ev.allObservations, context: Self.context)
+        let explained = await ctx.explainer.explainAll(ev.sortedFindings(), observations: ev.allObservations, context: ctx.prompts.text("sys.health.context", default: Self.context), limit: 10)
+        let hypotheses = await ctx.explainer.correlate(explained, observations: ev.allObservations, context: ctx.prompts.text("sys.health.context", default: Self.context))
         let counts = Dictionary(grouping: explained.filter { $0.severity > .info }) { $0.severity }.mapValues(\.count)
         let summary = String(format: "%d issue(s): %d high, %d medium, %d low. CPU %.0f%% idle, memory pressure %@, swap %@, %@ free on disk.",
                              counts.values.reduce(0, +), counts[.high] ?? 0, counts[.medium] ?? 0, counts[.low] ?? 0,

@@ -23,12 +23,11 @@ extension ChatEngine {
         .init("reply", .string, "with steps: what they will find out; without: your answer"),
     ])
 
+    static let exploreRepair = "Write a command that avoids this."
+
     static let exploreCommandSchema = Schema("ExploreCommand", [
         .init("args", .array(.string, max: 16), "the program, then each argument"),
     ])
-
-    /// Tries per step: the first command, then one repair from the reason it was refused.
-    static let exploreTries = 2
 
     /// The plan's reply and the commands that passed bibi's rules; nil when the model couldn't plan at all.
     func explore(_ run: RunRecord, _ state: inout ChatState, _ question: String,
@@ -54,14 +53,14 @@ extension ChatEngine {
             emit("delta", "Working out step \(i + 1) of \(steps.count): \(step)")
             let ask = "Request: \(Text.oneLine(question, max: 300))\nStep: \(step)"
             var prompt = ask, bound: [BoundAction] = []
-            for _ in 0..<Self.exploreTries {
+            for _ in 0..<knobs.int(.exploreTries) {
                 guard let r = try? await model(run).respond(prompt, instructions: instructions, schema: Self.exploreCommandSchema) else { break }
                 let args = r["args"]?.strings ?? []
                 let p = await bind([PlannedStep(tool: "command", args: args, purpose: step)], run: run, said: question, request: question)
                 if !p.actions.isEmpty { bound = p.actions; break }
                 // Neither runnable nor refused: this chat already proposed that command.
                 guard let why = p.refusals.first else { break }
-                prompt = ask + "\nYour last command: \(JSON.string(args))\nRefused: \(why)\nWrite a command that avoids this."
+                prompt = ask + "\nYour last command: \(JSON.string(args))\nRefused: \(why)\n" + prompts.text("chat.explore.repair", default: Self.exploreRepair)
             }
             if bound.isEmpty { failed.append(step) }
             actions += bound.filter { a in !actions.contains { $0.call == a.call } }

@@ -14,6 +14,11 @@ public struct SecAudit: Skill {
         [FirewallSet(enable: true), FirewallSet(enable: false), SharingSet(enable: false), SharingSet(enable: true)] + LaunchItemSpecs.all
     }
 
+    public var prompts: [PromptDefinition] {
+        [PromptDefinition("sec.audit.context", "Security audit context", group: PromptCatalog.analysis,
+                          purpose: "Put before each finding sec.audit asks the model to explain.", builtIn: Self.context)]
+    }
+
     static let context = "Context: a macOS security posture audit for a technical user. Be precise and calm; say how to verify before changing anything."
 
     struct Check {
@@ -284,7 +289,7 @@ public struct SecAudit: Skill {
 
         var findings = ev.sortedFindings()
         if !args.flag("no_explain") {
-            findings = await ctx.explainer.explainAll(findings, observations: ev.allObservations, context: Self.context, limit: 10)
+            findings = await ctx.explainer.explainAll(findings, observations: ev.allObservations, context: ctx.prompts.text("sec.audit.context", default: Self.context), limit: 10)
         }
         let failed = checks.filter { $0.passed == false }.map(\.name)
         let counts = Dictionary(grouping: findings.filter { $0.severity > .info }) { $0.severity }.mapValues(\.count)
