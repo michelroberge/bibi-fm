@@ -169,8 +169,8 @@ final class Events: @unchecked Sendable {
     @Test func lookNeverRepeatsAStepAndStopsAtTheCap() async throws {
         let model = ScriptedModel([
             "ChatTurn": [turn("check", reply: "Checking.", steps: [("command", ["echo", "one"])])],
-            "Next": [next(steps: [("command", ["echo", "two"])]), next(steps: [("command", ["echo", "three"])]),
-                     next(steps: [("command", ["echo", "four"])]), next(steps: [("command", ["echo", "five"])])],
+            "Next": [next(steps: [("command", ["uname"])]), next(steps: [("command", ["hostname"])]),
+                     next(steps: [("command", ["whoami"])]), next(steps: [("command", ["date"])])],
             "ChatAnswer": [turn("check", reply: "done")],
             "Compact": [compactAnswer],
         ])
@@ -193,6 +193,19 @@ final class Events: @unchecked Sendable {
         // The same step again adds nothing: the loop ends and bibi answers.
         #expect(run2.journalEntries.filter { $0.event == .executed }.count == 1)
         #expect(again.count("Next") == 1 && again.count("ChatAnswer") == 1)
+
+        let flags = ScriptedModel([
+            "ChatTurn": [turn("check", reply: "Checking.", steps: [("command", ["echo", "one"])])],
+            "Next": [next(steps: [("command", ["echo", "two"])]), next(steps: [("command", ["echo", "three"])])],
+            "ChatAnswer": [turn("check", reply: "done")],
+            "Compact": [compactAnswer],
+        ])
+        let (chat3, _, _) = engine(flags)
+        let run3 = try chat3.start()
+        await chat3.send(run3, "check it", look: true, emit: Events().emit)
+        // The same program with new arguments runs twice at most: a small model re-runs ps forever otherwise.
+        #expect(run3.journalEntries.filter { $0.event == .executed }.count == 2)
+        #expect(flags.count("Next") == 2 && flags.count("ChatAnswer") == 1)
     }
 
     @Test func refusedStepsAreExplained() async throws {

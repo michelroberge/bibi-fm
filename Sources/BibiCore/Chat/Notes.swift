@@ -27,9 +27,10 @@ extension ChatEngine {
     static let verbatimChars = 300
     /// Each extracted line is clipped to this.
     static let noteChars = 160
-    /// Long outputs are extracted chunk by chunk: at most this many chunks of this many characters (the first,
-    /// the middle and the last), so a huge output costs three small calls.
-    static let chunkChars = 1500, chunksMax = 3
+    /// Long outputs are extracted from their first chunk of this many characters (sorted listings, df, ps put what
+    /// matters first), and from the last chunk only if the first gave nothing (logs put it last): one small call,
+    /// two at most, however big the output.
+    static let chunkChars = 1500
 
     /// The notes for one result. A failure is one note saying so; a short output is kept as is; a long one goes to
     /// the model, and only lines that really are in the output are kept (a small model summarizes and invents).
@@ -41,7 +42,8 @@ extension ChatEngine {
         guard output.count > Self.verbatimChars else { return [note(output)] }
         var lines: [String] = []
         let instructions = prompts.text("chat.extract", default: Self.extractInstructions)
-        for chunk in Self.chunks(output) {
+        let chunks = Self.chunks(output)
+        for chunk in [chunks.first, chunks.count > 1 ? chunks.last : nil].compactMap({ $0 }) where lines.isEmpty {
             let prompt = "Purpose: \(Text.oneLine(purpose, max: 120))\nRequest: \(Text.oneLine(request, max: 200))\nOutput:\n\(chunk)"
             guard let a = try? await model(run).respond(prompt, instructions: instructions, schema: Self.extractSchema) else { continue }
             for l in a["lines"]?.strings ?? [] {
@@ -66,8 +68,7 @@ extension ChatEngine {
             cur += (cur.isEmpty ? "" : "\n") + line
         }
         if !cur.isEmpty { all.append(cur) }
-        guard all.count > chunksMax else { return all }
-        return [all[0], all[all.count / 2], all[all.count - 1]]
+        return all
     }
 
     /// The notes of one turn, as a prompt section.

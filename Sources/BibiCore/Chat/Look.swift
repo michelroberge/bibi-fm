@@ -6,7 +6,7 @@ extension ChatEngine {
     static let nextInstructions = """
     You are bibi, an assistant on the user's Mac, continuing one task. The notes are what the steps found so far.
     done: true when the notes answer the request, or when no read-only command would add to them.
-    steps: otherwise, the next one or two read-only commands that get closer; args is the program, then each argument, like ["du", "-sh", "~/Downloads"]. There is no shell: no pipes, redirections or wildcards. Never repeat a step whose result is in the notes. Nothing that changes the Mac.
+    steps: otherwise, the next one or two read-only commands that get closer; args is the program, then each argument, like ["du", "-sh", "~/Downloads"]. Pick the program that answers directly: lsof -nP -iTCP:<port> for a port, find <folder> -type f for files, system_profiler for hardware, log show for logs. There is no shell: no pipes, redirections or wildcards. Never run again a program whose result is in the notes. Nothing that changes the Mac.
     reply: one short sentence on what the steps will find out; empty when done.
     """
 
@@ -24,6 +24,8 @@ extension ChatEngine {
 
     /// Rounds of looking per user message, each of at most two steps.
     static let maxLookSteps = 3
+    /// Times one program may run in a task: a small model re-runs `ps` with new flags instead of moving on.
+    static let maxRunsPerProgram = 2
 
     /// A step that may run without a card: a read-only command or registry action, as the user, with nothing left
     /// to fill in. Skills (slow, with proposals of their own) and app calls always get a card.
@@ -52,6 +54,9 @@ extension ChatEngine {
         guard let intent = state.intent, let node = graph.node(intent) else { return ([], [], false) }
         let request = node.props["question"]?.string ?? node.text
         var ran = run.journalEntries.filter { $0.event == .executed }.compactMap(\.call)
+        // Programs run so far in this task (this turn's notes), to stop the same one coming back with new flags.
+        var programs = (state.notes ?? []).filter { $0.turn == state.turns }.map(\.actionID)
+            .compactMap { id in run.report()?.action(id).map { PlannedStep.from($0).signature } }
         var actions: [BoundAction] = [], results: [ExecResult] = [], failures = 0
         let instructions = prompts.text("chat.next", default: Self.nextInstructions)
         for i in 0..<Self.maxLookSteps {
@@ -69,7 +74,9 @@ extension ChatEngine {
             let steps = Array(Self.steps(a).prefix(2))
             guard !steps.isEmpty else { break }
             let plan = await bind(steps, run: run, said: request + "\n" + state.results.joined(separator: "\n"), request: request)
-            let fresh = plan.actions.filter { a in !ran.contains(a.call) }
+            let fresh = plan.actions.filter { a in
+                !ran.contains(a.call) && programs.filter { $0 == PlannedStep.from(a).signature }.count < Self.maxRunsPerProgram
+            }
             guard !fresh.isEmpty else { break }
             let reply = (a["reply"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let finding = propose(run, &state, title: node.name, explanation: reply, actions: fresh, owner: GraphSync.root)
@@ -84,6 +91,7 @@ extension ChatEngine {
             state.pending = nil
             actions += bound; results += r.results
             ran += bound.map(\.call)
+            programs += bound.map { PlannedStep.from($0).signature }
             failures = r.results.allSatisfy { !$0.ok } ? failures + 1 : 0
             if failures >= 2 { break }
         }
