@@ -185,8 +185,48 @@ main:has(.chatpage) { max-width: none; padding-left: 24px; padding-right: 24px; 
 .draft .problem { color: var(--bad); font-size: 12px; }
 .seg button:disabled { opacity: .5; cursor: not-allowed; }
 
-/* Graph page: inputs fill their table cells; JSON editors use the code font. */
+/* Settings tables: inputs fill their cells; JSON editors use the code font. */
 td input[type=text], td textarea { width: 100%; }
 textarea.mono { font-family: var(--mono); font-size: 12px; }
 a.card { display: block; }
 a.card:hover { text-decoration: none; }
+
+/* Settings: a section list on the left; built-in values plain, overrides marked with the accent. */
+.badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--warn); color: white; font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; }
+.settings { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 24px; align-items: start; margin-top: 16px; }
+.settings aside { position: sticky; top: 76px; display: grid; gap: 2px; }
+.settings aside a { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 8px; color: var(--text); }
+.settings aside a span:first-child { flex: 1; }
+.settings aside a:hover { background: var(--panel); text-decoration: none; }
+.settings aside a.on { background: var(--accent-soft); font-weight: 600; }
+.settings aside .count { font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 9px; padding: 0 6px; line-height: 16px; }
+.settings-main h2 { margin-top: 0; }
+.panel.overview { gap: 12px; }
+.builtin { font-size: 12px; color: var(--muted); }
+.over { border-left: 3px solid var(--accent) !important; padding-left: 12px; }
+tr.over td:first-child { border-left: 3px solid var(--accent); }
+.panel.list { padding: 0; }
+.list .item { display: block; padding: 12px 16px; border-bottom: 1px solid var(--line); color: inherit; }
+.list .item:last-child { border-bottom: none; }
+a.item:hover { background: var(--bg); text-decoration: none; }
+.knob { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.knob:last-child { border-bottom: none; }
+.warnbox { background: var(--warn-soft); border-color: var(--warn); }
+.problem { color: var(--bad); }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+textarea.prompt { font-family: var(--mono); font-size: 13px; }
+pre.diff { font-size: 12px; }
+pre.diff div { white-space: pre-wrap; }
+tr.on td { font-weight: 600; }
+.tokens { margin: 8px 0; }
+.tokenbar { display: flex; height: 10px; border-radius: 5px; background: var(--code); overflow: hidden; }
+.tokenbar i, .key::before { background: var(--accent); }
+.tokenbar i.ti, .key.ti::before { background: var(--info); }
+.tokenbar i.ts, .key.ts::before { background: var(--warn); }
+.tokenbar i.tp, .key.tp::before { background: var(--accent); }
+.key::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+@media (max-width: 800px) {
+  .settings { grid-template-columns: 1fr; }
+  .settings aside { position: static; display: flex; flex-wrap: wrap; }
+  .cols { grid-template-columns: 1fr; }
+}
