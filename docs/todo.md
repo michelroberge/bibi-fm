@@ -44,7 +44,14 @@ To do:
 
 ## Chat and learning: next steps
 
-Chat, the graph store (`bibi.db`) and skill learning shipped. Still open:
+Chat, the graph store (`bibi.db`), skill learning, notes (what the steps found, instead of raw output) and the
+"Let bibi look" loop shipped. `make eval` measures chat against the real model (`docs/eval.md`). Still open, in order:
+- Retrieval loses seeds that share one word with the request ("is my firewall on?" vs "is the firewall on"): try
+  `NLContextualEmbedding` (multilingual, better on short text) behind `Embedder`, and BM25 for examples, and keep
+  whichever the eval scores higher. That could also drop the translation call for retrieval.
+- A tiny routing call ahead of `ChatTurn` (single step / multi-step / answer), so "hello" gets an answer instead of
+  whatever tool is listed, and multi-step requests go straight to the look loop.
+- Episodic memory: store each chat's final summary as a node with a vector, and retrieve the top two into new chats.
 - Check chat in a real browser: streaming replies, approving an admin step (password dialog), dry run, and accepting a candidate from the chat card.
 - Chat with the on-device model is good at single read-only commands and at mapping to registry actions. It is weaker at multi-step plans and sometimes adds unrequested extra steps. Watch the approval statistics on the Skills page and add starter examples (`Sources/BibiCore/Graph/Seeds.swift`) for requests it gets wrong.
 - Retrieval uses skill keywords plus NaturalLanguage sentence embeddings. Embeddings barely separate short requests (cosine 0.3–0.5 for related and unrelated alike), so keywords do most of the work. Let learned skills grow their keywords from their example requests.

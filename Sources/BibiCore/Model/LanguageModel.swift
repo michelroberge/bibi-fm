@@ -62,3 +62,20 @@ extension LanguageModel {
         }
     }
 }
+
+extension Schema {
+    /// Characters the schema adds to a call, roughly: the names, descriptions and choices the framework spells out
+    /// to the model. For context accounting (`ChatEngine.ask`) and the model log.
+    public var estimatedChars: Int {
+        name.count + fields.reduce(0) { $0 + $1.name.count + ($1.description?.count ?? 0) + Self.chars($1.kind) }
+    }
+
+    static func chars(_ k: Kind) -> Int {
+        switch k {
+        case .string, .bool, .int: return 8
+        case .choice(let c): return c.reduce(0) { $0 + $1.count + 3 }
+        case .array(let item, _): return chars(item) + 8
+        case .object(let s): return s.estimatedChars
+        }
+    }
+}

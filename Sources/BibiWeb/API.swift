@@ -69,6 +69,8 @@ struct ChatBody: Decodable {
     var message: String
     /// The "Work it out" toggle: when no tool fits, work out commands instead of only answering.
     var explore: Bool?
+    /// The "Let bibi look" toggle: read-only steps run without a card, and bibi keeps looking until it can answer.
+    var look: Bool?
 }
 
 struct DecideBody: Decodable {
@@ -293,7 +295,7 @@ struct API: Sendable {
             let hub = manager.hub(run.id)
             guard hub.begin("chat") else { throw HTTPError(.conflict, message: "bibi is still busy with this chat (\(hub.busy ?? ""))") }
             Task {
-                await chat.send(run, b.message, explore: b.explore ?? false) { hub.emit($0, $1, phase: "chat") }
+                await chat.send(run, b.message, explore: b.explore ?? false, look: b.look ?? false) { hub.emit($0, $1, phase: "chat") }
                 hub.emit("done", "turn", phase: "chat")
             }
             return json(["id": run.id])

@@ -32,10 +32,12 @@ public enum DateText {
         if let day, let d = cal.date(byAdding: .day, value: day, to: cal.startOfDay(for: now)) {
             return ["tonight", "ce soir"].contains(lower) ? (cal.date(byAdding: .hour, value: 20, to: d)!, true) : (d, false)
         }
-        // "demain 15h", "demain à 9h30": a day word and a time.
-        if let m = Re.all(#"^(aujourd'hui|demain|today|tomorrow)\s+(?:à\s+|at\s+)?(\d{1,2})(?:h|:)(\d{2})?$"#,
-                          lower.replacingOccurrences(of: "’", with: "'")).first, m.count == 4,
-           let base = parse(m[1], now: now), let h = Int(m[2]), h < 24 {
+        // "demain 15h", "demain à 9h30", "tomorrow at 3pm": a day word and a time. (The detector below would
+        // read "tomorrow" from the real clock, not `now`.)
+        if let m = Re.all(#"^(aujourd'hui|demain|today|tomorrow)\s+(?:à\s+|at\s+)?(\d{1,2})(?:(?:h|:)(\d{2})?|\s*(am|pm))$"#,
+                          lower.replacingOccurrences(of: "’", with: "'")).first, m.count == 5,
+           let base = parse(m[1], now: now), var h = Int(m[2]), h < 24 {
+            if m[4] == "pm", h < 12 { h += 12 } else if m[4] == "am", h == 12 { h = 0 }
             return (cal.date(bySettingHour: h, minute: Int(m[3]) ?? 0, second: 0, of: base.date)!, true)
         }
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue),

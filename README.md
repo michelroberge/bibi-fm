@@ -24,7 +24,7 @@ make install          # release build into ~/.local/libexec/bibi, symlinked as ~
 bibi list
 ```
 
-For development, `./bin/bibi` builds if needed and runs from the repo. Run the tests with `make test` (`swift run bibi-tests`). `make ci` runs everything a merge to `main` needs: a strict build where any warning in bibi's code is an error, the tests, a release build and an install into a scratch folder that is then run. GitHub Actions runs it on every pull request (`.github/workflows/ci.yml`), and `main` only accepts pull requests whose `ci` check passed. Pushing a tag `v<version>` matching `VERSION` publishes a release with the built binary. The version lives in `VERSION` and `Sources/BibiCore/Version.swift` (a test checks that they match); change both with `make bump V=x.y.z`.
+For development, `./bin/bibi` builds if needed and runs from the repo. Run the tests with `make test` (`swift run bibi-tests`). `make eval` sends a fixed set of requests to chat with the real on-device model and scores what it proposes (see [docs/eval.md](docs/eval.md)). `make ci` runs everything a merge to `main` needs: a strict build where any warning in bibi's code is an error, the tests, a release build and an install into a scratch folder that is then run. GitHub Actions runs it on every pull request (`.github/workflows/ci.yml`), and `main` only accepts pull requests whose `ci` check passed. Pushing a tag `v<version>` matching `VERSION` publishes a release with the built binary. The version lives in `VERSION` and `Sources/BibiCore/Version.swift` (a test checks that they match); change both with `make bump V=x.y.z`.
 
 ## Commands
 
@@ -120,8 +120,10 @@ Each turn:
    - any other command, as a program and its arguments
 3. **Check.** bibi's rules, not the model, decide what each step is and how risky it is (details below).
 4. **Approve.** Each step is a card with **Approve** / **Skip** and **Preview**. If you skip a step and say why, bibi adds an "Avoid:" note to that skill's guidance for next time.
-5. **Run and answer.** Approved steps run through the same harness as skills, so they are journaled and undoable where possible. Their output becomes evidence, and bibi answers from it. If a skill ran, its own recommendations come back as a new proposal to approve.
+5. **Run, note, answer.** Approved steps run through the same harness as skills, so they are journaled and undoable where possible. Their output becomes evidence. The model never sees the raw output: a short output is kept as it is, and a long one (a `log show`, a `du`) is reduced to at most five lines copied from it, in a separate small call per chunk, and bibi keeps only lines that really are in the output. These notes are the task's working memory, and bibi answers from them. If a skill ran, its own recommendations come back as a new proposal to approve.
 6. **Compact.** Only the last four messages stay word for word. Older ones are folded into a running summary, because the on-device model has a context of about 4k tokens. Facts confirmed in the conversation are stored, but only if their words and numbers appear in what was said or seen. A request is not evidence: asking for an email doesn't make "an email was sent" a fact.
+
+**Let bibi look.** With this toggle on (next to the message box), steps that only read run right away, with no card. After each round bibi reads its notes and decides whether they answer the request or which one or two read-only commands to run next, for at most three rounds. Each command is still checked by the same rules and journaled. A step that would change anything (a write, a network command, admin rights, an email, a skill) becomes a card as before, and the loop goes on once you decide. bibi's own approvals are counted apart from yours (`auto`), so they don't change how skills are ranked. **Work it out** is the other toggle: when no tool fits, bibi plans the steps in plain words and turns each one into a command for you to approve.
 
 How commands from chat are checked:
 - **One program with its arguments, never a shell.**

@@ -42,6 +42,11 @@ public struct ChatState: Codable, Sendable {
     public var hints: [String]?
     /// Steps bibi couldn't run yet and why, kept for one turn so the user's answer can complete them.
     public var draft: String?
+    /// "Let bibi look" was on for the current request: read-only steps run without a card and bibi keeps looking
+    /// until it can answer. (Optional, like every field added later: older chat.json files must still load.)
+    public var look: Bool?
+    /// What the steps found, as short lines copied from their output: what the model sees instead of raw output.
+    public var notes: [ChatNote]?
 
     public init(id: String, title: String) { self.id = id; self.title = title }
 }

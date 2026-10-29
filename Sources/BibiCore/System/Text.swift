@@ -93,6 +93,11 @@ public enum Text {
 
     /// Keeps the first of lines that differ only in numbers (timestamps, pids), noting how often each repeated.
     /// Log output is mostly repetition; this leaves room for the lines that differ.
+    /// Tokens the on-device model would roughly count: about four characters each for English prose; code, paths
+    /// and French tokenize worse. An estimate only (the framework doesn't count), checked against `make eval`.
+    public static func estimatedTokens(_ s: String) -> Int { estimatedTokens(chars: s.utf8.count) }
+    public static func estimatedTokens(chars: Int) -> Int { (chars + 3) / 4 }
+
     public static func collapseRepeats(_ s: String) -> String {
         var order: [String] = [], first: [String: String] = [:], count: [String: Int] = [:]
         for line in s.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
