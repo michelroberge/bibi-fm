@@ -28,6 +28,8 @@ public enum Seeds {
         ("launch Safari", [.init(tool: "action:open_app", args: ["app=Safari"])]),
         ("create a skill that shows free disk space and the largest files in Downloads",
          [.init(tool: "skill:skills.create", args: ["shows free disk space and the largest files in Downloads"])]),
+        ("what happened on this Mac in the last 24 hours",
+         [.init(tool: "skill:sys.health", args: ["--log-minutes", "1440", "--crash-days", "1"])]),
     ]
 
     public static func sync(_ graph: GraphStore) {

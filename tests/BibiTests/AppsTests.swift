@@ -724,6 +724,74 @@ func makeApp(_ root: String, name: String, bundle: String, sdef: String?) {
         #expect(t.contains { $0.role == "note" && $0.text.contains("expected key=value") })
     }
 
+    @Test func whenNoToolFitsTheModelAnswersOnItsOwn() async throws {
+        // The Comet case: the model keeps proposing app steps that can't run; the way out asks it plainly, like
+        // `fm respond`, with the user's own words and no tools.
+        let bad = turn("check recent activity", reply: "", steps: [("action:mail_send", ["to", "bob@example.com", "Lunch"])])
+        let own: JSONValue = .object(["reply": .string("Essayez log show --last 24h dans le Terminal.")])
+        let model = ScriptedModel(["ChatTurn": [bad], "Fallback": [own], "Compact": [compactAnswer]])
+        let (chat, graph) = try chatEngine(model)
+        let run = try chat.start()
+        let question = "Que s'est-il passé sur ce mac dans les dernières 24 heures"
+        await chat.send(run, question, emit: Events().emit)
+        let t = chat.transcript(run)
+        #expect(t.last?.text == "Essayez log show --last 24h dans le Terminal.")
+        #expect(t.contains { $0.role == "note" && $0.text.contains("nothing on this Mac was checked") })
+        #expect(model.last("Fallback") == question)
+        #expect(run.report()?.actions.isEmpty != false)
+        #expect(graph.stats("intent:\(run.id)-1")["fallback"] == 1)
+    }
+
+    @Test func workingItOutTurnsPlainStepsIntoCommands() async throws {
+        let bad = turn("check recent activity", reply: "", steps: [("action:mail_send", ["to", "bob@example.com", "Lunch"])])
+        let plan: JSONValue = .object(["needs_actions": .bool(true), "reply": .string("I'll check uptime and the macOS version."),
+                                       "steps": .strings(["show how long since the last restart", "show the macOS version"])])
+        // Step 1 passes; step 2 first names a program that isn't installed, then is repaired from the reason.
+        let model = ScriptedModel([
+            "ChatTurn": [bad], "ExplorePlan": [plan], "Compact": [compactAnswer],
+            "ExploreCommand": [.object(["args": .strings(["uptime"])]), .object(["args": .strings(["no-such-program-bibi"])]),
+                               .object(["args": .strings(["sw_vers"])])],
+        ])
+        let (chat, graph) = try chatEngine(model)
+        let run = try chat.start()
+        await chat.send(run, "what happened on this Mac", explore: true, emit: Events().emit)
+        let actions = try #require(run.report()?.actions)
+        #expect(actions.map(\.command) == ["uptime", "sw_vers"])
+        #expect(model.count("ExploreCommand") == 3)
+        #expect(model.last("ExploreCommand").contains("Refused: no-such-program-bibi: no-such-program-bibi is not installed on this Mac"))
+        #expect(model.count("Fallback") == 0)
+        let t = chat.transcript(run)
+        #expect(t.contains { $0.role == "note" && $0.text.contains("worked these commands out on its own") })
+        #expect(t.last?.finding != nil && chat.state(run).pending == t.last?.finding)
+        #expect(graph.stats("intent:\(run.id)-1")["explored"] == 1)
+        #expect(graph.stats(GraphSync.root)["proposed"] == 1)
+    }
+
+    @Test func workingItOutCanJustAnswer() async throws {
+        let bad = turn("translate", reply: "", steps: [("action:mail_send", ["to", "bob@example.com", "Lunch"])])
+        let plan: JSONValue = .object(["needs_actions": .bool(false), "reply": .string("« Bonjour » means hello."), "steps": .strings([])])
+        let model = ScriptedModel(["ChatTurn": [bad], "ExplorePlan": [plan], "Compact": [compactAnswer]])
+        let (chat, _) = try chatEngine(model)
+        let run = try chat.start()
+        await chat.send(run, "what does bonjour mean", explore: true, emit: Events().emit)
+        let t = chat.transcript(run)
+        #expect(t.last?.text == "« Bonjour » means hello.")
+        #expect(t.contains { $0.role == "note" && $0.text == ChatEngine.ownAnswerNote })
+        #expect(model.count("ExploreCommand") == 0)
+        #expect(run.report()?.actions.isEmpty != false)
+    }
+
+    @Test func workingItOutIsOffByDefault() async throws {
+        let bad = turn("check", reply: "", steps: [("action:mail_send", ["to", "bob@example.com", "Lunch"])])
+        let model = ScriptedModel(["ChatTurn": [bad], "Compact": [compactAnswer],
+                                   "Fallback": [.object(["reply": .string("Try Console.")])]])
+        let (chat, _) = try chatEngine(model)
+        let run = try chat.start()
+        await chat.send(run, "what happened on this Mac", emit: Events().emit)
+        #expect(model.count("ExplorePlan") == 0)
+        #expect(chat.transcript(run).last?.text == "Try Console.")
+    }
+
     @Test func linksDontPickTools() throws {
         let (chat, graph) = try chatEngine(ScriptedModel([:]))
         _ = catalog()

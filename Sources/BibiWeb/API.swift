@@ -67,6 +67,8 @@ struct UndoBody: Decodable {
 struct ChatBody: Decodable {
     var conversation: String?
     var message: String
+    /// The "Work it out" toggle: when no tool fits, work out commands instead of only answering.
+    var explore: Bool?
 }
 
 struct DecideBody: Decodable {
@@ -291,7 +293,7 @@ struct API: Sendable {
             let hub = manager.hub(run.id)
             guard hub.begin("chat") else { throw HTTPError(.conflict, message: "bibi is still busy with this chat (\(hub.busy ?? ""))") }
             Task {
-                await chat.send(run, b.message) { hub.emit($0, $1, phase: "chat") }
+                await chat.send(run, b.message, explore: b.explore ?? false) { hub.emit($0, $1, phase: "chat") }
                 hub.emit("done", "turn", phase: "chat")
             }
             return json(["id": run.id])
