@@ -50,6 +50,13 @@ public final class ChatEngine: Sendable {
     reply: short and plain. When proposing, say what the steps will do. When answering from results, give the numbers that matter.
     """
 
+    static let fallbackInstructions = """
+    You are a helpful assistant on the user's Mac (macOS). Answer the user's message directly and briefly, in the user's language.
+    You cannot see or check this Mac. When the answer depends on its state, say which Terminal commands or System Settings would show it. Never invent output or numbers.
+    """
+
+    static let fallbackSchema = Schema("Fallback", [.init("reply", .string, "your answer")])
+
     static let compactInstructions = """
     You keep the running summary of a conversation between a user and bibi, an assistant on their Mac.
     summary: the old summary updated with the new messages, at most 120 words: what the user wants, what ran, what was found, what is still open.
@@ -160,7 +167,8 @@ public final class ChatEngine: Sendable {
 
     // MARK: a user message
 
-    public func send(_ run: RunRecord, _ text: String, emit: @escaping ChatEmit) async {
+    /// `explore`: when no tool fits, work out commands instead of only answering (the chat's "Work it out" toggle).
+    public func send(_ run: RunRecord, _ text: String, explore: Bool = false, emit: @escaping ChatEmit) async {
         var state = state(run)
         let question = Text.clip(text.trimmingCharacters(in: .whitespacesAndNewlines), max: 2000)
         guard !question.isEmpty else { return }
@@ -178,7 +186,7 @@ public final class ChatEngine: Sendable {
         state.pending = nil
         say(run, &state, ChatMessage("user", question), emit)
         let english = await english(run, question)
-        await think(run, &state, question: question, english: english, previous: previous, emit: emit)
+        await think(run, &state, question: question, english: english, previous: previous, explore: explore, emit: emit)
         await compact(run, &state)
         save(run, state)
     }
@@ -186,7 +194,7 @@ public final class ChatEngine: Sendable {
     /// One model turn. `question` is nil for the follow-up that answers from results.
     /// `english` is the request in English, for retrieval: examples, facts and embeddings are in English.
     func think(_ run: RunRecord, _ state: inout ChatState, question: String?, english: String? = nil, previous: String? = nil,
-               emit: @escaping ChatEmit) async {
+               explore: Bool = false, emit: @escaping ChatEmit) async {
         let focus = question ?? state.recent.last(where: { $0.role == "user" })?.text ?? ""
         // The follow-up answers the request whose intent node holds its English.
         let topic = english ?? (question == nil ? state.intent.flatMap { graph.node($0)?.text } : nil) ?? focus
@@ -309,14 +317,7 @@ public final class ChatEngine: Sendable {
             if !reply.hasSuffix("?") { reply = "The card below didn't change: edit it there, or tell me what to change." }
         }
         if !plan.actions.isEmpty {
-            finding = addProposal(run, title: phrase, explanation: reply, actions: plan.actions)
-            state.pending = finding
-            let owner = owner(of: tried)
-            let g = prompts.active("skill." + (graph.node(owner)?.name ?? "generic"), default: guidanceDefault(owner))
-            state.skill = owner
-            state.guidance = g.version.isEmpty ? nil : g.version
-            graph.record("proposed", node: owner, conversation: run.id)
-            if let gv = state.guidance { graph.record("proposed", node: gv, conversation: run.id) }
+            finding = propose(run, &state, title: phrase, explanation: reply, actions: plan.actions, owner: owner(of: tried))
         }
         if !plan.refusals.isEmpty {
             if finding == nil {
@@ -328,6 +329,9 @@ public final class ChatEngine: Sendable {
                     if theirs.count < plan.refusals.count {
                         let why = plan.refusals.filter { !Self.userCanAnswer($0) }.map { "- " + $0 }.joined(separator: "\n")
                         say(run, &state, ChatMessage("note", "What went wrong with the proposed steps:\n" + why), emit)
+                    }
+                    if theirs.isEmpty, let question, let out = await wayOut(run, &state, question, phrase: phrase, explore: explore, emit) {
+                        (reply, finding) = out
                     }
                 }
             } else {
@@ -341,8 +345,48 @@ public final class ChatEngine: Sendable {
             // The model sometimes answers as if the steps had already run; nothing has run yet.
             reply = "Here is what I'd do; approve it to run."
         }
+        if reply.isEmpty, finding == nil, let question, let out = await wayOut(run, &state, question, phrase: phrase, explore: explore, emit) {
+            (reply, finding) = out
+        }
         if reply.isEmpty { reply = finding == nil ? "I don't have an answer for that." : "Here is what I'd run." }
         say(run, &state, ChatMessage("bibi", reply, finding: finding), emit)
+    }
+
+    /// A proposal from this turn, recorded for the skill that owns it (statistics, guidance, learning).
+    func propose(_ run: RunRecord, _ state: inout ChatState, title: String, explanation: String, actions: [BoundAction], owner: String) -> String {
+        let finding = addProposal(run, title: title, explanation: explanation, actions: actions)
+        state.pending = finding
+        let g = prompts.active("skill." + (graph.node(owner)?.name ?? "generic"), default: guidanceDefault(owner))
+        state.skill = owner
+        state.guidance = g.version.isEmpty ? nil : g.version
+        graph.record("proposed", node: owner, conversation: run.id)
+        if let gv = state.guidance { graph.record("proposed", node: gv, conversation: run.id) }
+        return finding
+    }
+
+    /// No tool fit: work out commands (the "Work it out" toggle) or let the model answer on its own. The reply, and
+    /// the proposal when commands were worked out.
+    func wayOut(_ run: RunRecord, _ state: inout ChatState, _ question: String, phrase: String, explore: Bool,
+                _ emit: @escaping ChatEmit) async -> (String, String?)? {
+        if explore, let r = await self.explore(run, &state, question, emit) {
+            guard !r.actions.isEmpty else { return (r.reply, nil) }
+            return (r.reply, propose(run, &state, title: phrase, explanation: r.reply, actions: r.actions, owner: GraphSync.root))
+        }
+        return await fallback(run, &state, question, emit).map { ($0, nil) }
+    }
+
+    static let ownAnswerNote = "No tool fit this request, so this is the model's own answer: nothing on this Mac was checked."
+
+    /// The way out when no tool fits: the model answers the user's own words on its own, as `fm respond` would from a
+    /// shell, without bibi's tools, examples or rules. Nothing runs, and a note says nothing on this Mac was checked.
+    func fallback(_ run: RunRecord, _ state: inout ChatState, _ question: String, _ emit: ChatEmit) async -> String? {
+        emit("delta", "Trying on my own…")
+        guard let r = try? await model(run).respond(question, instructions: prompts.text("chat.fallback", default: Self.fallbackInstructions),
+                                                    schema: Self.fallbackSchema),
+              let own = r["reply"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !own.isEmpty else { return nil }
+        if let id = state.intent { graph.record("fallback", node: id, conversation: run.id) }
+        say(run, &state, ChatMessage("note", Self.ownAnswerNote), emit)
+        return own
     }
 
     /// True if a message whose words selected `tools` can be the answer to `draft`: it brings in no built-in app

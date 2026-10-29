@@ -1,4 +1,5 @@
 import BibiCore
+import BibiSkills
 import Foundation
 import Testing
 
@@ -301,5 +302,16 @@ final class Events: @unchecked Sendable {
         // A bare name is the app parameter, and the card shows the app's own name.
         let a = try #require(run.report()?.findings.first?.recommendations.first)
         #expect(a.call.spec == "open_app" && a.call.params["app"] == "Safari")
+    }
+
+    @Test func whatHappenedOnThisMacIsAHealthCheck() {
+        let (chat, _, _) = engine(ScriptedModel([:]), skills: [SysHealth(), NetIdentify()])
+        let r = chat.retrieval("What happened on this mac in the last 24 hours")
+        #expect(r.skills == ["sys.health"])
+        #expect(r.examples.contains("intent:seed-22"))
+        // Time spans and "this Mac" match nothing on their own: not an app's "undo the last change", not a MAC address.
+        #expect(Similarity.hits("in the last 24 hours", "Undo the last change.") == 0)
+        #expect(Similarity.hits("what's on this mac", "identify a device by mac address") == 0)
+        #expect(Similarity.hits("who is mac 00:dd:1f:e2:aa:44", "identify a device by mac address") == 1)
     }
 }

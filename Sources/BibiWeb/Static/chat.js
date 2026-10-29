@@ -3,6 +3,8 @@
 // confirmDialog, decisionsFor, currentStream) at call time.
 
 const chatUI = { id: "", view: null, lastSeq: 0, draft: "", running: new Set(), quick: [], query: "" };
+// "Work it out": when no tool fits, bibi works out commands to propose instead of only answering. Kept per browser.
+try { chatUI.explore = localStorage.getItem("bibi-explore") === "1"; } catch { chatUI.explore = false; }
 
 async function showChat(id) {
   chatUI.id = id;
@@ -53,8 +55,15 @@ function renderChat(chats) {
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(input.value); }
   });
+  const explore = h("input", { type: "checkbox", id: "composer-explore", checked: chatUI.explore });
+  explore.addEventListener("change", () => {
+    chatUI.explore = explore.checked;
+    try { localStorage.setItem("bibi-explore", explore.checked ? "1" : "0"); } catch {}
+  });
   const composer = h("div", { class: "composer" }, input,
-    h("button", { class: "primary", id: "composer-send", onclick: () => sendChat(input.value) }, "Send"));
+    h("button", { class: "primary", id: "composer-send", onclick: () => sendChat(input.value) }, "Send"),
+    h("label", { class: "check small muted explore", title: "When no tool fits, bibi plans the steps in plain words and turns each one into a command for you to approve, instead of only answering" },
+      explore, "Work it out when no tool fits (experimental)"));
 
   const head = v ? h("div", { class: "spread" }, h("h1", {}, v.state.title),
     h("span", { class: "row small" },
@@ -249,7 +258,7 @@ async function sendChat(text) {
   text = (text || "").trim();
   if (!text) return;
   try {
-    const r = await api("chat", { conversation: chatUI.id || undefined, message: text });
+    const r = await api("chat", { conversation: chatUI.id || undefined, message: text, explore: chatUI.explore });
     chatUI.draft = "";
     if (r.id !== chatUI.id) {
       // A new conversation: show it, then follow its events from the start.

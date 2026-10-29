@@ -143,8 +143,10 @@ main:has(.chatpage) { max-width: none; padding-left: 24px; padding-right: 24px; 
 .msg.thinking { width: auto; }
 .proposal .rec { background: var(--bg); }
 .proposal.past { display: grid; gap: 4px; margin-top: 8px; }
-.composer { position: sticky; bottom: 0; display: flex; gap: 8px; align-items: flex-end; background: var(--bg); padding: 10px 0 16px; }
+.composer { position: sticky; bottom: 0; display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; background: var(--bg); padding: 10px 0 16px; }
 .composer button { flex: none; }
+.composer textarea { flex: 1 1 0; min-width: 0; }
+.composer .explore { flex-basis: 100%; margin: 0; }
 .candidate { border-left: 4px solid var(--accent) !important; padding-left: 12px !important; }
 @media (max-width: 1000px) {
   .chatpage { grid-template-columns: 180px minmax(0, 1fr); }

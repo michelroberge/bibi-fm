@@ -293,15 +293,29 @@ public enum Similarity {
                                          "le", "la", "les", "un", "une", "des", "du", "de", "au", "aux", "et", "ou", "est", "que",
                                          "qui", "ce", "cet", "cette", "ces", "dans", "pour", "par", "sur", "avec", "pas", "ne", "en",
                                          "il", "elle", "on", "je", "tu", "nous", "vous", "lui", "leur", "mon", "ma", "mes", "ton",
-                                         "ta", "son", "sa", "ses", "moi", "toi", "se"]
+                                         "ta", "son", "sa", "ses", "moi", "toi", "se",
+                                         // Time spans: "in the last 24 hours" offered Comet's "undo the last change".
+                                         "last", "past", "recent", "recently", "hour", "hours", "minute", "minutes", "day", "days"]
 
     /// Lowercase content words with a plural s removed.
     public static func terms(_ text: String) -> Set<String> {
         Set(tokens(text).filter { !stopwords.contains($0) && $0.count > 1 }.map { $0.count > 3 && $0.hasSuffix("s") ? String($0.dropLast()) : $0 })
     }
 
+    /// "this Mac" is the computer, not a MAC address: it shouldn't offer net.identify.
+    static let macOwners: Set<String> = ["this", "my", "the", "your", "whole", "ce", "mon", "le", "ton", "votre"]
+
+    static func meansComputer(_ query: String) -> Bool {
+        let t = tokens(query)
+        return t.indices.contains { t[$0] == "mac" && $0 > 0 && macOwners.contains(t[$0 - 1]) }
+    }
+
     /// How many content words of `query` appear in `text`.
-    public static func hits(_ query: String, _ text: String) -> Int { terms(query).intersection(terms(text)).count }
+    public static func hits(_ query: String, _ text: String) -> Int {
+        var q = terms(query)
+        if meansComputer(query) { q.remove("mac") }
+        return q.intersection(terms(text)).count
+    }
 
     public static func jaccard(_ a: String, _ b: String) -> Double {
         let x = Set(tokens(a)).subtracting(stopwords), y = Set(tokens(b)).subtracting(stopwords)

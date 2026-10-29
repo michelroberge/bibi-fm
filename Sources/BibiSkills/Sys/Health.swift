@@ -7,7 +7,7 @@ public struct SysHealth: Skill {
     public init() {}
     public let name = "sys.health"
     public let help = "Check CPU, memory, disk I/O, battery, login items, crashes and system logs, and explain what's wrong"
-    public let keywords = "slow sluggish hot fan battery crash crashes freeze freezing lag performance hang beachball health overheating"
+    public let keywords = "slow sluggish hot fan battery crash crashes freeze freezing lag performance hang beachball health overheating happened activity event events error errors fault faults log logs restart"
     public var params: [Param] {
         [
             .option("log_minutes", "--log-minutes", kind: .int, default: "15", help: "how many minutes of the system log to scan for faults"),
